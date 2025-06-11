@@ -371,7 +371,10 @@ class farcoast_animation:
             blit=False,
         )
     
-    def _style_axes(self, ax, **kwargs):
+    def _style_axes(self, ax, modelinfo=True, show_xlabel=True, show_ylabel=True, **kwargs):
+        # clear any left overs
+        #ax.cla()
+
         # Coastline, bathy, limits
         self.geo_coastline.boundary.plot(ax=ax, edgecolor='grey')
         self.geo_coastline.plot(ax=ax, color='lightgrey', alpha=0.8, zorder=50)
@@ -391,7 +394,9 @@ class farcoast_animation:
             ax.set_ylabel("")
             ax.tick_params(
                 axis='both', which='both', 
-                labelsize=6, labelcolor='grey',
+                labelsize=6, labelcolor='grey', 
+                labelbottom=show_xlabel,
+                labelleft=show_ylabel,
                 )
         else:
             gl = ax.gridlines(
@@ -401,15 +406,18 @@ class farcoast_animation:
             )
             gl.top_labels = False
             gl.right_labels = False
+            gl.left_labels = show_ylabel,
+            gl.bottom_labels = show_xlabel,
             gl.xlabel_style = {'size': 6, 'color': 'gray'}
             gl.ylabel_style = {'size': 6, 'color': 'gray'}
         
         if "speed" in self.var_animate and hasattr(self, "arrows"):
-            qk = self._add_quiver_key(ax, **kwargs)
+            qk = self._add_quiver_key(ax, arrows = kwargs['arrows'])
             qk.set_zorder(11)
 
         annotate_title(ax, fontsize=7, **self.fig_text.__dict__)
-        annotate_model_setup_info(ax, fontsize=8, **self.fig_text.__dict__)
+        if modelinfo:
+            annotate_model_setup_info(ax, fontsize=8, **self.fig_text.__dict__)
         if self.watermark:
             annotate_watermark(ax=ax, text="Created by FarCoast v2")
             annotate_dataowner(ax=ax, text="Firum")
@@ -417,24 +425,46 @@ class farcoast_animation:
         # TODO: not sure if this is needed?
         self.fig.subplots_adjust(bottom=0.15)
 
-    def _draw_static_figure(self, data, resample=None, title=None):
+    def _draw_static_figure(
+        self, data, resample=None, title=None, 
+        ax=None, nrows=1, ncols=1, 
+        figsize=None, transform=None, modelinfo=True,
+        show_xlabel=True, show_ylabel=True, colorbar=True,
+        **kwargs):
         """General-purpose figure plotter for any static data array."""
 
-        # figure setup
-        if self.null_proj:
-            fig, ax = plt.subplots(
-                figsize=cm2inch(15, 15), facecolor="white", dpi=self.dpi
-                )  # No projection at all
-            transform = ax.transData
+        if figsize is None:
+            size = cm2inch(15*ncols, 15*nrows)
         else:
-            fig, ax = plt.subplots(
-                figsize=cm2inch(15, 15), facecolor="white", dpi=self.dpi, 
-                subplot_kw={'projection': self.map_proj}
-                )
-            transform = self.map_proj_original
+            size = cm2inch(figsize[0]*ncols, figsize[1]*nrows)
+        
+        # common kwargs
+        common = dict(
+            figsize=size, facecolor="white", dpi=self.dpi, 
+            squeeze = False, sharex='col', sharey='row',
+            subplot_kw = ({} if self.null_proj else {'projection': self.map_proj})
+            )
+
+        if ax is None:
+            # figure setup
+            if self.null_proj:
+                fig, axes = plt.subplots(nrows, ncols, **common)  # No projection at all
+                axes = list(axes.flatten())
+                transform = axes[0].transData
+            else:
+                fig, axes = plt.subplots(nrows, ncols, **common, 
+                    #subplot_kw={'projection': self.map_proj}
+                    )
+                axes = list(axes.flatten())
+                transform = self.map_proj_original
+            
+        else:
+            fig = None
+            axes = [ax]
+            transform = transform
 
         # Use the internal image plotting function
-        mesh = self._plot_image(ax=ax, data=data, transform=transform)
+        mesh = self._plot_image(ax=axes[0], data=data, transform=transform)
 
         inner_kwargs = {}
 
@@ -443,7 +473,7 @@ class farcoast_animation:
             u = resample[self.fig_text.u]
             v = resample[self.fig_text.v]
             arrows = self._plot_arrows(
-                ax=ax,
+                ax=axes[0],
                 data=resample,
                 u=u.name,
                 v=v.name,
@@ -452,16 +482,17 @@ class farcoast_animation:
             inner_kwargs = {'arrows': arrows}
 
         self._configure_colormap_and_scaling(data)
-        self._style_axes(ax, **inner_kwargs)
-        self._add_colorbar(ax, mesh)
+        self._style_axes(
+            ax = axes[0], modelinfo=modelinfo, 
+            show_ylabel=show_ylabel, show_xlabel=show_xlabel, **inner_kwargs)
+        if colorbar:
+            self._add_colorbar(ax = axes[0], mesh=mesh)
 
         # Title
         if title:
-            ax.set_title(title, fontsize=10, color="black")
+            axes[0].set_title(title, fontsize=10, color="black")
 
-        #fig.tight_layout()
-        display(fig)
-        plt.close(fig)
+        return fig, axes, transform
     
     def _timeslice(self, data, t_index):
         """
@@ -517,7 +548,11 @@ class farcoast_animation:
             "a 2-tuple/list, or a slice object"
         )
     
-    def draw_frame(self, t_index, title=None):
+    def draw_frame(
+        self, t_index, title=None, 
+        ax=None, nrows=1, ncols=1, 
+        figsize=None, transform=None, silent=False, modelinfo=True, 
+        show_xlabel = True, show_ylabel = True, colorbar=True, **kwargs):
         """Draws a single frame at a specific time index."""
         
         data = self._timeslice(self.ds_mean, t_index)
@@ -531,7 +566,41 @@ class farcoast_animation:
         else:
             resampled = None
         title = title or f"Frame at {np.datetime_as_string(t0, 'h')}"
-        self._draw_static_figure(data, resample=resampled, title=title)
+        fig, ax, transform = self._draw_static_figure(
+            data, resample=resampled, title=title, 
+            ax = ax, nrows=nrows, ncols=ncols, figsize=figsize, modelinfo=modelinfo, 
+            show_xlabel = show_xlabel, show_ylabel = show_ylabel, colorbar=colorbar, **kwargs,
+            )
+        if silent:
+            return None
+        else:
+            return fig, ax, transform
+    
+    def draw_frames_grid(self, t_indices, nrows, ncols, figsize=None):
+
+        fig, axes, transform = self.draw_frame(
+            t_index=t_indices[0], nrows=nrows, ncols=ncols, figsize=figsize,
+            modelinfo = False, show_ylabel=False, show_xlabel = False, colorbar = False)
+        # fig, axes, transform = self._draw_static_figure(
+        #     data=self._timeslice(self.ds_mean, t_indices[0]), ax=None, nrows=nrows, ncols=ncols, figsize=figsize,
+        #     modelinfo = False, show_ylabel=False, show_xlabel = False, colorbar = False)
+
+        for i, (ax, t) in enumerate(zip(axes, t_indices)):
+            # ax in last row or first column
+            is_bottom = (i // ncols) == (nrows - 1)
+            is_left   = (i %  ncols) == 0
+            is_right = (i % ncols) == (ncols -1)
+
+            #ax.cla()
+            #ax.gridlines(draw_labels=False)
+
+            self.draw_frame(
+                t_index=t, ax=ax, transform=transform, modelinfo = False, 
+                show_ylabel = is_left, show_xlabel = is_bottom, colorbar = is_right)
+
+        # 5) finalize
+        #fig.tight_layout()
+        fig.canvas.draw()
     
     def draw_timeperiod_frame(self, t_index, reduce_func="mean"):
         """
