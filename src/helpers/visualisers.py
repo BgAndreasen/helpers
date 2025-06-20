@@ -129,6 +129,8 @@ class farcoast_animation:
         depth_slice = [None, None],
         quiver_every_x_box = 2, 
         quiver_scale = 5,
+        quiver_max = None,
+        quiver_normalise = False,
         dpi = 150,
         fps = 12, 
         write_output = True,
@@ -149,6 +151,8 @@ class farcoast_animation:
         self.depth_slice = depth_slice
         self.quiver_every_x_box = quiver_every_x_box
         self.quiver_scale = quiver_scale
+        self.quiver_max = quiver_max
+        self.quiver_normalise = quiver_normalise
         self.dpi = dpi
         self.fps = fps
         self.write_output = write_output
@@ -308,27 +312,46 @@ class farcoast_animation:
             animated=True
         )
     
-    def _plot_arrows(self, ax, data, u, v, transform=None):
+    def _plot_arrows(self, ax, data, u, v, transform=None, normalise=None):
         transform = transform or self.transform
+        normalise = normalise or self.quiver_normalise
 
         # Extract coordinate and vector arrays
+        # TODO: this doesn't work yet
         X = data['lon_rho'].values
         Y = data['lat_rho'].values
         U = data[u].values
         V = data[v].values
+        if normalise:
+            magnitude = np.sqrt(U**2 + V**2)
+            magnitude[magnitude == 0] = 1.
+            U = U / magnitude
+            V = V / magnitude
 
         return ax.quiver(
             X, Y,
             U, V,
             transform=transform,
             animated=True,
+            #units='xy',
+            #scale_units = 'xy',
+            angles = 'xy',
             scale=self.quiver_scale,
-            #scale_units='xy',
-            #angles='xy',
+            minlength=0,
+            width=0.003,
+            headlength=3.5,
+            headaxislength=3.5,
+            headwidth=2.5,
             pivot='tail',
+            zorder=70,
         )
     
-    def _add_quiver_key(self, ax, arrows, x=0.1, y=0.08, veclength=0.5):
+    def _add_quiver_key(self, ax, arrows, x=0.1, y=0.08):
+        if self.quiver_max is None:
+            veclength = 0.5
+        else:
+            veclength = self.quiver_max
+
         """Add a quiverkey to the plot"""
         label = '%3.1f m/s' % veclength
         return ax.quiverkey(
@@ -337,7 +360,8 @@ class farcoast_animation:
                 U=veclength,
                 label=label,
                 labelpos='S',
-                coordinates='axes'
+                coordinates='axes',
+                zorder = 70
                 )
     
     def update(self, t):
@@ -412,8 +436,8 @@ class farcoast_animation:
             gl.ylabel_style = {'size': 6, 'color': 'gray'}
         
         if "speed" in self.var_animate and hasattr(self, "arrows"):
-            qk = self._add_quiver_key(ax, arrows = kwargs['arrows'])
-            qk.set_zorder(11)
+            self._add_quiver_key(ax=ax, arrows = kwargs['arrows'])
+            #qk.set_zorder(1)
 
         annotate_title(ax, fontsize=7, **self.fig_text.__dict__)
         if modelinfo:
@@ -725,9 +749,14 @@ class farcoast_animation:
         """Display the static plot (first frame)."""
         plt.show(self.animation)
 
-    def save(self, filename):
+    def save(self, filename, fps=None, dpi=None):
         """Save to GIF with configured fps/dpi."""
-        self.animation.save(filename, fps=self.params['fps'], dpi=self.params['dpi'])
+        if fps is None:
+            fps = self.fps
+        if dpi is None:
+            dpi = self.dpi
+
+        self.animation.save(filename, fps=fps, dpi=dpi)
     
     
     def _add_colorbar(self, ax, mesh):
@@ -842,9 +871,12 @@ class farcoast_animation:
             }).load()
 
             # Optional arrow masking
-            if self.var_percentile == 100 and self.var_max is not None:
+            if self.var_max is not None:
                 mag2 = self.resample[u_name]**2 + self.resample[v_name]**2
                 self.resample = self.resample.where(mag2 < self.var_max**2, 0)
+            if self.quiver_max is not None:
+                mag3 = self.resample[u_name]**2 + self.resample[v_name]**2
+                self.resample = self.resample.where(mag3 < self.quiver_max**2, 0)
         
         else:
             # Regular variable averaging over depth
@@ -896,7 +928,7 @@ class farcoast_animation:
         self.maxconc = round(np.percentile(clean_values, var_max_perc),ndigits=1)
 
         #manual max value
-        if self.var_percentile == 100 and self.var_max is not None:
+        if self.var_max is not None:
             self.maxconc = self.var_max
 
         # Optionally set up tick labels if needed in future
