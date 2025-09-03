@@ -112,7 +112,7 @@ class farcoast_animation:
     Creates animations from FarCoast modelling data.
 
     Parameters:
-    ds (xarray ds): dataset from farcoast_import
+    farcoast_ds (xarray ds): dataset from farcoast_import
     var_animate (str): variable to animate
     var_percentile (int): percentage of variable values shown in plots, helpful if there is a blow up in the model
 
@@ -135,7 +135,7 @@ class farcoast_animation:
         quiver_every_x_box = 2, 
         quiver_scale = 5,
         quiver_max = None,
-        quiver_normalise = False, # not implemented
+        quiver_normalise = False,
         dpi = 150,
         fps = 12, 
         write_output = True,
@@ -192,26 +192,9 @@ class farcoast_animation:
         # assign to self
         self.__dict__.update(self._init_kwargs)
 
-        # add
-        self.fig = None
-        self.ax = None
-        self.ds_mean = None
-        self.resample = None
-        self.image = None
-        self.arrows = None
-        self.animation = None
-
-        # the projection the data is in
-        # TODO: find the projection of the ROMS output!!
-        epsg_org = 4326
-        self.map_proj_original = ccrs.PlateCarree()
-        # the projection we want to transform to
-        epsg = 5316 
 
         # TODO: get this out of function ;)
         if boundary is None:
-            fjord_ymax, fjord_xmin = (self.ds.lon_rho.min(), self.ds.lat_rho.min())
-            fjord_ymin, fjord_xmax = (self.ds.lon_rho.max(), self.ds.lat_rho.max())
             use_manual_boundaries = False
         else:
             use_manual_boundaries = True
@@ -230,10 +213,13 @@ class farcoast_animation:
             fjord_ymin, fjord_xmax = (62.14, -6.63)
         else:
             raise Exception(f'{self.boundary} is not defined in function')
-        
-        # set the min and max used for axes
-        self.fxmin, self.fymin = self.map_proj.transform_point(x=fjord_xmin, y=fjord_ymin, src_crs=self.map_proj_original)
-        self.fxmax, self.fymax = self.map_proj.transform_point(x=fjord_xmax, y=fjord_ymax, src_crs=self.map_proj_original)
+
+        # the projection the data is in
+        # TODO: find the projection of the ROMS output!!
+        epsg_org = 4326
+        self.map_proj_original = ccrs.PlateCarree()
+        # the projection we want to transform to
+        epsg = 5316 
 
         # read gdb and shape files
         self.geo_coastline = gpd.read_file(self.coastline_path, layer = 'oyggjar')
@@ -263,44 +249,61 @@ class farcoast_animation:
                 self.stations = self.stations.to_crs(epsg=epsg)
             epsg_filename = epsg
 
-        # extract info from the FarCoast files
         self.fig_text = farcoast_anno_text(
             attr_title = self.ds.attrs["title"],
             attr_file = self.ds.attrs["file"]
         )
-        
-        self._initiate_plot()
 
-        # TODO: take this out of init
+        # find the ploting axis limits
+        # forcing data, not always relevent, could be change to larger area of interest, i.e. fjord
+        self.fxmin, self.fymin = self.map_proj.transform_point(self.ds.lon_rho.min(), self.ds.lat_rho.min(), self.map_proj_original)
+        self.fxmax, self.fymax = self.map_proj.transform_point(self.ds.lon_rho.max(), self.ds.lat_rho.max(), self.map_proj_original)
+
+        if(use_manual_boundaries):
+            self.fxmin, self.fymin = self.map_proj.transform_point(x=fjord_xmin, y=fjord_ymin, src_crs=self.map_proj_original)
+            self.fxmax, self.fymax = self.map_proj.transform_point(x=fjord_xmax, y=fjord_ymax, src_crs=self.map_proj_original)
         
+        # TODO: take this out of init
+        # figure setup
+        if self.null_proj:
+            self.fig, self.ax = plt.subplots(
+                figsize=cm2inch(15, 15), facecolor="white", dpi=self.dpi
+                )  # No projection at all
+            self.transform = self.ax.transData
+        else:
+            self.fig, self.ax = plt.subplots(
+                figsize=cm2inch(15, 15), facecolor="white", dpi=self.dpi, 
+                subplot_kw={'projection': self.map_proj}
+                )
+            self.transform = self.map_proj_original
         
         # prepare the data for plotting
-        #self._prepare_data_subset(self.first_time_frame, self.final_time_frame)
+        self._prepare_data_subset(self.first_time_frame, self.final_time_frame)
         # configue colorbar scaling
-        #self._configure_colormap_and_scaling(self.ds_mean)
+        self._configure_colormap_and_scaling(self.ds_mean)
 
         # image "mesh"
-        #self.image = self._plot_image(ax=self.ax, data=self.ds_mean.isel(ocean_time = 0))
+        self.image = self._plot_image(ax=self.ax, data=self.ds_mean.isel(ocean_time = 0))
 
-        # inner_kwargs = {}
+        inner_kwargs = {}
 
-        # if "speed" in self.var_animate:
+        if "speed" in self.var_animate:
 
-        #     self.arrows = self._plot_arrows(
-        #         ax = self.ax, 
-        #         data = self.resample.isel(ocean_time = 0),
-        #         u = self.fig_text.u,
-        #         v = self.fig_text.v,
-        #         )
-        #     inner_kwargs = {'arrows': self.arrows}
+            self.arrows = self._plot_arrows(
+                ax = self.ax, 
+                data = self.resample.isel(ocean_time = 0),
+                u = self.fig_text.u,
+                v = self.fig_text.v,
+                )
+            inner_kwargs = {'arrows': self.arrows}
 
-        # self.animation = self.animate()
+        self.animation = self.animate()
 
-        # # Apply all styling (coastline, limits, ticks, etc.)
-        # self._style_axes(self.ax, **inner_kwargs)
+        # Apply all styling (coastline, limits, ticks, etc.)
+        self._style_axes(self.ax, **inner_kwargs)
 
-        # # Add colorbar
-        # self._add_colorbar(self.ax, self.image)
+        # Add colorbar
+        self._add_colorbar(self.ax, self.image)
 
 
         # write the plot in location specified
@@ -349,25 +352,6 @@ class farcoast_animation:
 
         plt.close(self.fig)    
 
-    def _initiate_plot(self):
-        # figure setup
-        if self.null_proj:
-            self.fig, self.ax = plt.subplots(
-                figsize=cm2inch(15, 15), facecolor="white", dpi=self.dpi
-                )  # No projection at all
-            self.transform = self.ax.transData
-        else:
-            self.fig, self.ax = plt.subplots(
-                figsize=cm2inch(15, 15), facecolor="white", dpi=self.dpi, 
-                subplot_kw={'projection': self.map_proj}
-                )
-            self.transform = self.map_proj_original
-    
-    def _prepare_first_frame(self):
-        #her skal meira gerast!!!
-        self._prepare_data_subset_new(self.ds, t_index = 0)
-        
-    
     def _plot_image(self, ax, data, transform=None):
         transform = transform or self.transform
         Z = data.values
@@ -623,7 +607,6 @@ class farcoast_animation:
                     )
             
             return t0
-
         # single‐value selection
         if isinstance(t_index, (int, str, np.datetime64)):
             t0 = to_ns(t_index)
@@ -733,7 +716,7 @@ class farcoast_animation:
         # Title and render
         title = f"{reduce_func} from {np.datetime_as_string(t0, 'h')} to {np.datetime_as_string(t1, 'h')}"
         self._draw_static_figure(data, resample=resampled, title=title)
-
+    
     def draw_timeperiod_frame1(self, t_start, t_end, reduce_func = "mean"):
         """
         Update the animation to show a reduction over a time period [t_start, t_end].
@@ -861,101 +844,6 @@ class farcoast_animation:
         cbar = ax.figure.colorbar(mesh, cax=cax, orientation='vertical', extend=extend)
         cbar.set_label(self.colorbar_label, labelpad=5, fontsize=10)
         cbar.ax.tick_params(labelsize=6, color='grey')
-    
-    def _prepare_data_subset_new(self, t_index=None):
-        
-        if t_index is None:
-            self.ocean_time_max = self.final_time_frame or self.ds.ocean_time.size
-            time_slice = slice(self.first_time_frame, self.ocean_time_max)
-        else:
-            time_slice = t_index
-        
-        # relevant timeslice
-        ds_var = self._timeslice(data = self.ds[self.var_animate], t_index = time_slice)
-        # Determine depth dimension
-        if "s_rho" in ds_var.dims:
-            depth_dim = "s_rho"
-            u_name, v_name = "u_rho", "v_rho"
-            depth_slice = dict(s_rho=slice(*self.depth_slice))
-            #u_slice = dict(s_rho=slice(*self.depth_slice))
-            #v_slice = dict(s_rho=slice(*self.depth_slice))
-
-        elif "z" in ds_var.dims:
-            depth_dim = "z"
-            u_name, v_name = "u_rho_z", "v_rho_z"
-            depth_slice = dict(z=slice(*self.depth_slice))
-            #u_slice = dict(z=slice(*self.depth_slice))
-            #v_slice = dict(z=slice(*self.depth_slice))
-        else:
-            raise ValueError("Depth dimension (s_rho or z) not found in variable.")
-
-        # Save for later
-        self.fig_text.add(
-            depth_var=depth_dim,
-            depth_used=f"{depth_dim} depths",
-            u=u_name,
-            v=v_name
-        )
-
-        # Calculate depth metadata
-        depth_vals = ds_var[depth_dim].isel(**depth_slice).values
-        self.fig_text.add(
-            mean_depth=np.round(np.nanmean(depth_vals), 2),
-            min_depth=np.round(np.nanmin(depth_vals), 2),
-            max_depth=np.round(np.nanmax(depth_vals), 2)
-        )
-
-         # Time-sliced subset of the variable averaged over depth
-        if "speed" in self.var_animate:
-            
-            # Average u and v over depth
-            u = self.ds[u_name].isel(ocean_time=time_slice).isel(**depth_slice)
-            v = self.ds[v_name].isel(ocean_time=time_slice).isel(**depth_slice)
-
-            # SCALAR-MEAN SPEED for mesh
-            speed = np.sqrt(u**2 + v**2).mean(dim=depth_dim, skipna=True)
-            speed.attrs["long_name"] = "Mean current speed (scalar average)"
-            speed.attrs["units"] = "m/s"
-            self.ds_mean = speed.load()
-
-            # VECTOR-MEAN u/v for arrows
-            u_depthavg = u.mean(dim=depth_dim, skipna=True)
-            v_depthavg = v.mean(dim=depth_dim, skipna=True)
-
-            # Coarsen for quiver plot
-            # TODO: there should be an option for no arrows!
-            self.resample = xr.Dataset({
-                u_name: u_depthavg.isel(
-                    eta_rho=slice(None, None, self.quiver_every_x_box),
-                    xi_rho=slice(None, None, self.quiver_every_x_box)
-                ),
-                v_name: v_depthavg.isel(
-                    eta_rho=slice(None, None, self.quiver_every_x_box),
-                    xi_rho=slice(None, None, self.quiver_every_x_box)
-                )
-            }).load()
-
-            # Optional arrow masking
-            if self.var_max is not None:
-                mag2 = self.resample[u_name]**2 + self.resample[v_name]**2
-                self.resample = self.resample.where(mag2 < self.var_max**2, 0)
-            if self.quiver_max is not None:
-                mag3 = self.resample[u_name]**2 + self.resample[v_name]**2
-                self.resample = self.resample.where(mag3 < self.quiver_max**2, 0)
-        
-        else:
-            # Regular variable averaging over depth
-            ds_subset = ds_var.isel(**depth_slice)
-            self.ds_mean = ds_subset.mean(dim=depth_dim, skipna=True, keep_attrs=True).load()
-
-        
-        # Add time bounds to fig_text
-        self.fig_text.add(
-            start_hour = np.datetime_as_string(self.ds_mean.isel(ocean_time = 0).ocean_time.values,'h'),
-            end_hour = np.datetime_as_string(self.ds_mean.isel(ocean_time = -1).ocean_time.values,'h')
-            )
-
-
 
     def _prepare_data_subset(self, first_time_frame, final_time_frame):
         """
