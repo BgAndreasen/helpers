@@ -216,25 +216,25 @@ class farcoast_animation:
         else:
             use_manual_boundaries = True
         
-        if boundary == "VES":
-            # Vestmanna boundary
-            fjord_ymax, fjord_xmin = (62.156740, -7.197381)
-            fjord_ymin, fjord_xmax = (62.134209, -7.140186)
-        elif boundary == "GOT":
-            # Gøtuvík boundary
-            fjord_ymax, fjord_xmin = (62.220, -6.76)
-            fjord_ymin, fjord_xmax = (62.120, -6.5)
-        elif boundary == "GOTzoom":
-            # Gøtuvík boundary
-            fjord_ymax, fjord_xmin = (62.20, -6.76)
-            fjord_ymin, fjord_xmax = (62.14, -6.63)
-        else:
-            raise Exception(f'{self.boundary} is not defined in function')
+            if boundary == "VES":
+                # Vestmanna boundary
+                fjord_ymax, fjord_xmin = (62.156740, -7.197381)
+                fjord_ymin, fjord_xmax = (62.134209, -7.140186)
+            elif boundary == "VESsund":
+                # Vestmanna sund
+                fjord_ymax, fjord_xmin = (62.16, -7.24)
+                fjord_ymin, fjord_xmax = (62.10, -7.12)
+            elif boundary == "GOT":
+                # Gøtuvík boundary
+                fjord_ymax, fjord_xmin = (62.220, -6.76)
+                fjord_ymin, fjord_xmax = (62.120, -6.5)
+            elif boundary == "GOTzoom":
+                # Gøtuvík boundary
+                fjord_ymax, fjord_xmin = (62.20, -6.76)
+                fjord_ymin, fjord_xmax = (62.14, -6.63)
+            else:
+                raise Exception(f'{self.boundary} is not defined in function')
         
-        # set the min and max used for axes
-        self.fxmin, self.fymin = self.map_proj.transform_point(x=fjord_xmin, y=fjord_ymin, src_crs=self.map_proj_original)
-        self.fxmax, self.fymax = self.map_proj.transform_point(x=fjord_xmax, y=fjord_ymax, src_crs=self.map_proj_original)
-
         # read gdb and shape files
         self.geo_coastline = gpd.read_file(self.coastline_path, layer = 'oyggjar')
         self.geo_bathy = gpd.read_file(self.bathy_path, layer = 'dyb')
@@ -262,6 +262,11 @@ class farcoast_animation:
             if self.stations is not None:
                 self.stations = self.stations.to_crs(epsg=epsg)
             epsg_filename = epsg
+
+        # set the min and max used for axes
+        self.fxmin, self.fymin = self.map_proj.transform_point(x=fjord_xmin, y=fjord_ymin, src_crs=self.map_proj_original)
+        self.fxmax, self.fymax = self.map_proj.transform_point(x=fjord_xmax, y=fjord_ymax, src_crs=self.map_proj_original)
+
 
         # extract info from the FarCoast files
         self.fig_text = farcoast_anno_text(
@@ -384,15 +389,18 @@ class farcoast_animation:
         )
     
     def _plot_arrows(self, ax, data, u, v, transform=None, normalise=None):
+        """
+        The supplied u and v have to be east and north alligned, not grid alligned!!
+        u and v are the names of these two in the data
+        """
         transform = transform or self.transform
         normalise = normalise or self.quiver_normalise
 
-        # Extract coordinate and vector arrays
-        # TODO: this doesn't work yet
         X = data['lon_rho'].values
         Y = data['lat_rho'].values
         U = data[u].values
         V = data[v].values
+
         if normalise:
             magnitude = np.sqrt(U**2 + V**2)
             magnitude[magnitude == 0] = 1.
@@ -406,7 +414,7 @@ class farcoast_animation:
             animated=True,
             #units='xy',
             #scale_units = 'xy',
-            angles = 'xy',
+            angles = 'uv',
             scale=self.quiver_scale,
             minlength=0,
             width=0.003,
@@ -454,9 +462,9 @@ class farcoast_animation:
         #update arrows if applicaple
         if "speed" in self.var_animate:
             # Get updated vector fields for time t
-            u = self.resample[self.fig_text.u].sel(ocean_time=t).values
-            v = self.resample[self.fig_text.v].sel(ocean_time=t).values
-            self.arrows.set_UVC(U=u, V=v)
+            u_t = self.resample[self.fig_text.u].sel(ocean_time=t).values
+            v_t = self.resample[self.fig_text.v].sel(ocean_time=t).values
+            self.arrows.set_UVC(U=u_t, V=v_t)
     
     def animate(self):
         return FuncAnimation(
@@ -703,7 +711,7 @@ class farcoast_animation:
         #fig.tight_layout()
         fig.canvas.draw()
     
-    def draw_timeperiod_frame(self, t_index, reduce_func="mean"):
+    def draw_timeperiod_frame(self, t_index, reduce_func="mean", **kwargs):
         """
         Draw a frame summarizing a time‐period slice using a reduction (mean, max, etc).
 
@@ -732,7 +740,7 @@ class farcoast_animation:
             resampled = None
         # Title and render
         title = f"{reduce_func} from {np.datetime_as_string(t0, 'h')} to {np.datetime_as_string(t1, 'h')}"
-        self._draw_static_figure(data, resample=resampled, title=title)
+        self._draw_static_figure(data, resample=resampled, title=title, **kwargs)
 
     def draw_timeperiod_frame1(self, t_start, t_end, reduce_func = "mean"):
         """
@@ -807,6 +815,9 @@ class farcoast_animation:
         Returns:
         - HTML object for display in Jupyter/Quarto.
         """
+        if getattr(self, "animation", None) is None:
+            raise RuntimeError("Animation not built yet. Call .build() first.")
+
         html_video = self.animation.to_html5_video()
         styled_html = f'''
         <div style="max-width: {max_width}px; margin: auto; padding: 0; overflow:hidden;">
@@ -876,16 +887,23 @@ class farcoast_animation:
         if "s_rho" in ds_var.dims:
             depth_dim = "s_rho"
             u_name, v_name = "u_rho", "v_rho"
-            depth_slice = dict(s_rho=slice(*self.depth_slice))
-            #u_slice = dict(s_rho=slice(*self.depth_slice))
-            #v_slice = dict(s_rho=slice(*self.depth_slice))
+            depth_slice = {depth_dim: slice(*self.depth_slice)}
 
         elif "z" in ds_var.dims:
             depth_dim = "z"
             u_name, v_name = "u_rho_z", "v_rho_z"
-            depth_slice = dict(z=slice(*self.depth_slice))
-            #u_slice = dict(z=slice(*self.depth_slice))
-            #v_slice = dict(z=slice(*self.depth_slice))
+            a, b = self.depth_slice
+            print(a, b)
+            if a is not None:
+                i0 = int(ds_var.indexes[depth_dim].get_indexer([a], method="nearest")[0])
+            else: 
+                i0 = a
+            if b is not None:
+                i1 = int(ds_var.indexes[depth_dim].get_indexer([b], method="nearest")[0]) + 1
+            else:
+                i1 = b
+            print(i0, i1)
+            depth_slice = {depth_dim: slice(i0,i1)}
         else:
             raise ValueError("Depth dimension (s_rho or z) not found in variable.")
 
@@ -911,6 +929,9 @@ class farcoast_animation:
             # Average u and v over depth
             u = self.ds[u_name].isel(ocean_time=time_slice).isel(**depth_slice)
             v = self.ds[v_name].isel(ocean_time=time_slice).isel(**depth_slice)
+            ang = self.ds['angle']
+            if "units" in ang.attrs and "deg" in ang.attrs["units"].lower():
+                ang = xr.apply_ufunc(np.deg2rad, ang)
 
             # SCALAR-MEAN SPEED for mesh
             speed = np.sqrt(u**2 + v**2).mean(dim=depth_dim, skipna=True)
@@ -921,19 +942,31 @@ class farcoast_animation:
             # VECTOR-MEAN u/v for arrows
             u_depthavg = u.mean(dim=depth_dim, skipna=True)
             v_depthavg = v.mean(dim=depth_dim, skipna=True)
+            print(u_depthavg.shape)
+
+            # Rotate grid (ξ,η) -> geographic (E,N)
+            # sometimes this is rotated differently, just be avare!!
+            # TODO: is there a way to make sure this doesn't get buggered??
+            Ue = u_depthavg*np.cos(ang) - v_depthavg*np.sin(ang)   # eastward
+            Vn = u_depthavg*np.sin(ang) + v_depthavg*np.cos(ang)   # northward
+
+            quiver_step = self.quiver_every_x_box
+            idx = dict(eta_rho=slice(None, None, quiver_step), xi_rho=slice(None, None, quiver_step))
 
             # Coarsen for quiver plot
             # TODO: there should be an option for no arrows!
-            self.resample = xr.Dataset({
-                u_name: u_depthavg.isel(
-                    eta_rho=slice(None, None, self.quiver_every_x_box),
-                    xi_rho=slice(None, None, self.quiver_every_x_box)
-                ),
-                v_name: v_depthavg.isel(
-                    eta_rho=slice(None, None, self.quiver_every_x_box),
-                    xi_rho=slice(None, None, self.quiver_every_x_box)
-                )
-            }).load()
+            self.resample = xr.Dataset(
+                data_vars={
+                    u_name: Ue.isel(**idx),
+                    v_name: Vn.isel(**idx),
+                },
+                coords={
+                    "lon_rho": ds_var["lon_rho"].isel(**idx),
+                    "lat_rho": ds_var["lat_rho"].isel(**idx),
+                    "ocean_time": ds_var["ocean_time"],
+                },
+            ).load()
+            print(self.resample[u_name].shape)
 
             # Optional arrow masking
             if self.var_max is not None:
@@ -1118,3 +1151,43 @@ class farcoast_animation:
         new_kwargs.update(override_kwargs)
         # build and return a fresh object
         return type(self)(**new_kwargs)
+    
+    def build(self):
+        """
+        Explicitly build the first frame and the FuncAnimation.
+
+        Usage:
+            ani = farcoast_animation(..., write_output=False).build()
+            ani.embed_animation_responsive()
+        """
+        # 1) prepare subset (time window, depth averaging, quiver fields)
+        self._prepare_data_subset_new(t_index=None)
+
+        # 2) set colormap and scaling from the prepared data
+        self._configure_colormap_and_scaling(self.ds_mean)
+
+        # 3) draw first frame (image)
+        self.image = self._plot_image(
+            ax=self.ax,
+            data=self.ds_mean.isel(ocean_time=0)
+        )
+
+        # 4) arrows if animating a speed field
+        inner_kwargs = {}
+        if "speed" in self.var_animate:
+            self.arrows = self._plot_arrows(
+                ax=self.ax,
+                data=self.resample.isel(ocean_time=0),
+                u=self.fig_text.u,
+                v=self.fig_text.v,
+            )
+            inner_kwargs = {"arrows": self.arrows}
+
+        # 5) axes styling + colorbar
+        self._style_axes(self.ax, **inner_kwargs)
+        self._add_colorbar(self.ax, self.image)
+
+        # 6) create the matplotlib.animation.FuncAnimation
+        self.animation = self.animate()
+
+        return self
