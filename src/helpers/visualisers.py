@@ -9,6 +9,8 @@ import geopandas as gpd
 import cmocean
 from IPython.display import HTML, display
 import warnings
+from contextlib import contextmanager
+
 
 def cm2inch(*tupl):
     """convert centimeters to inches."""
@@ -17,6 +19,20 @@ def cm2inch(*tupl):
         return tuple(i/inch for i in tupl[0])
     else:
         return tuple(i/inch for i in tupl)
+
+def compute_figsize(nrows, ncols, panel_size=None, unit="cm"):
+    # panel_size is (width, height) for a single panel
+    if panel_size is None:
+        w, h = 15, 15  # default per-panel size
+    else:
+        w, h = panel_size
+    if unit == "cm":
+        from math import isfinite
+        return cm2inch(w * ncols, h * nrows)
+    elif unit in {"inch", "in"}:
+        return (w * ncols, h * nrows)
+    else:
+        raise ValueError("unit must be 'cm' or 'inch'")
 
 def annotate_model_setup_info(ax, fontsize=8, **kwargs):
     """
@@ -50,12 +66,12 @@ def add_model_setup_info(xpos, ypos, fontsize=8, **kwargs):
                fontsize = fontsize,
                color = "grey")
 
-def annotate_dataowner(text, ax, **kwargs):
+def annotate_dataowner(text, ax, fontsize=10, **kwargs):
     ax.annotate(
         text = text,
         xy=(0.95, 0.05), 
         xycoords=('axes fraction', 'axes fraction'),
-        fontsize=10, color='grey', 
+        fontsize=fontsize, color='grey', 
         ha = 'right',
         va = 'bottom',
         alpha=0.5,
@@ -72,7 +88,7 @@ class farcoast_anno_text:
         self.__dict__.update(kwargs)
 
 
-def annotate_watermark(text, ax, **kwargs):
+def annotate_watermark(text, ax, fontsize = 30, **kwargs):
     """
     Annotate a watermark on the axis.
     """
@@ -80,7 +96,7 @@ def annotate_watermark(text, ax, **kwargs):
         text = text,
         xy=(0.05, 0.05), 
         xycoords=('axes fraction', 'axes fraction'),
-        fontsize=30, 
+        fontsize=fontsize, 
         color='grey', 
         alpha=0.5,
         zorder = 70,
@@ -137,8 +153,8 @@ class farcoast_animation:
         quiver_max = None,
         quiver_normalise = False, # not implemented
         dpi = 150,
-        fps = 12, 
-        write_output = True,
+        fps = 4, 
+        write_output = False,
         watermark = True,
         output_type = "gif",
         save_folder = "gifs/",
@@ -146,6 +162,7 @@ class farcoast_animation:
         coastline_path = "../data/geodata/lendiskort.gdb/",
         stations = None,
         null_proj = False,
+        base_fontsize = 7,
         **kwargs
         ):
 
@@ -186,11 +203,16 @@ class farcoast_animation:
             coastline_path=coastline_path,
             null_proj=null_proj,
             stations=stations,
+            base_fontsize=base_fontsize,
             **kwargs
         )
 
         # assign to self
         self.__dict__.update(self._init_kwargs)
+
+        # flags
+        self._prepared = False
+        self._static_built = False
 
         # add
         self.fig = None
@@ -232,6 +254,10 @@ class farcoast_animation:
                 # Gøtuvík boundary
                 fjord_ymax, fjord_xmin = (62.20, -6.76)
                 fjord_ymin, fjord_xmax = (62.14, -6.63)
+            elif boundary == "TRO":
+                # Trongisvág boundary
+                fjord_ymax, fjord_xmin = (61.56, -6.84)
+                fjord_ymin, fjord_xmax = (61.51, -6.72)
             else:
                 raise Exception(f'{self.boundary} is not defined in function')
         
@@ -276,37 +302,6 @@ class farcoast_animation:
         
         self._initiate_plot()
 
-        # TODO: take this out of init
-        
-        
-        # prepare the data for plotting
-        #self._prepare_data_subset(self.first_time_frame, self.final_time_frame)
-        # configue colorbar scaling
-        #self._configure_colormap_and_scaling(self.ds_mean)
-
-        # image "mesh"
-        #self.image = self._plot_image(ax=self.ax, data=self.ds_mean.isel(ocean_time = 0))
-
-        # inner_kwargs = {}
-
-        # if "speed" in self.var_animate:
-
-        #     self.arrows = self._plot_arrows(
-        #         ax = self.ax, 
-        #         data = self.resample.isel(ocean_time = 0),
-        #         u = self.fig_text.u,
-        #         v = self.fig_text.v,
-        #         )
-        #     inner_kwargs = {'arrows': self.arrows}
-
-        # self.animation = self.animate()
-
-        # # Apply all styling (coastline, limits, ticks, etc.)
-        # self._style_axes(self.ax, **inner_kwargs)
-
-        # # Add colorbar
-        # self._add_colorbar(self.ax, self.image)
-
 
         # write the plot in location specified
         # TODO: take this out of init
@@ -320,14 +315,14 @@ class farcoast_animation:
             if not any(self.depth_slice):
                 filename = (
                     f"{self.save_folder}ROMS_func_animation_{boundary}{self.fig_text.attr_file}"
-                    f"_time{first_time_frame}to{self.ocean_time_max}"
+                    f"_time{first_time_frame}to{self.final_time_frame}"
                     f"_{self.var_animate}_covers_{self.var_percentile}_dpi{dpi}"
                     )
             else:
                 depths = "".join(list(map(str, self.depth_slice)))
                 filename = (
                     f"{self.save_folder}ROMS_func_animation_{boundary}{self.fig_text.attr_file}"
-                    f"_time{first_time_frame}to{self.ocean_time_max}"
+                    f"_time{first_time_frame}to{self.final_time_frame}"
                     f"_{self.var_animate}_depth{depths}_covers_{self.var_percentile}_dpi{dpi}"
                     )
 
@@ -351,8 +346,42 @@ class farcoast_animation:
                 html = self.animation.to_jshtml()
                 with open(filename, "w") as f:
                     f.write(html)
+        
+        plt.close(self.fig)
+    
+    @contextmanager
+    def _override(self, **over):
+        old = {k: getattr(self, k) for k in over}
+        try:
+            for k,v in over.items(): 
+                setattr(self, k, v)
+            yield
+        finally:
+            for k,v in old.items(): 
+                setattr(self, k, v)
+    
+    def _compute_fontscale(self, panel_size, unit="cm", ref=(15, 15)):
+        """
+        panel_size: (w, h) per panel
+        unit: 'cm' or 'inch'
+        ref: reference per-panel size that base_fontsize was tuned for
+        """
+        if panel_size is None:
+            w, h = ref
+        else:
+            w, h = panel_size
 
-        plt.close(self.fig)    
+        if unit == "cm":
+            w_in, h_in = w/2.54, h/2.54
+            rw, rh = ref[0]/2.54, ref[1]/2.54
+        else:  # inches
+            w_in, h_in = w, h
+            rw, rh = (ref[0], ref[1]) if unit == "inch" else (ref[0]/2.54, ref[1]/2.54)
+
+        # scale roughly with the shorter panel side (stable for wide/tall panels)
+        k = min(w_in, h_in) / min(rw, rh)
+        # clamp to avoid microscopic/huge text
+        return max(0.6, min(1.6, k))
 
     def _initiate_plot(self):
         # figure setup
@@ -439,6 +468,7 @@ class farcoast_animation:
                 U=veclength,
                 label=label,
                 labelpos='S',
+                labelsep=0.004,
                 coordinates='axes',
                 zorder = 70
                 )
@@ -450,7 +480,7 @@ class farcoast_animation:
             x = 0.15,
             color = "black",
             style = 'italic',
-            fontsize = 10
+            fontsize = self.base_fontsize * 1.5,
             )
         
         # data
@@ -479,12 +509,12 @@ class farcoast_animation:
         #ax.cla()
 
         # Coastline, bathy, limits
-        self.geo_coastline.boundary.plot(ax=ax, edgecolor='grey')
+        self.geo_coastline.boundary.plot(ax=ax, edgecolor='grey', linewidth=0.2)
         self.geo_coastline.plot(ax=ax, color='lightgrey', alpha=0.8, zorder=50)
-        self.geo_bathy.plot(ax=ax, linewidth=0.2, color='grey')
+        self.geo_bathy.plot(ax=ax, linewidth=0.1, color='darkgrey')
    
         # set up plot parameters
-        mpl.rcParams["font.size"] = 10
+        mpl.rcParams["font.size"] = self.base_fontsize
         mpl.rcParams['axes.edgecolor'] = 'lightgrey'
 
         ax.set_ylim([self.fymin, self.fymax])
@@ -502,33 +532,38 @@ class farcoast_animation:
             ax.set_ylabel("")
             ax.tick_params(
                 axis='both', which='both', 
-                labelsize=6, labelcolor='grey', 
+                labelsize=self.base_fontsize*0.9, 
+                labelcolor='grey', 
                 labelbottom=show_xlabel,
-                labelleft=show_ylabel,
+                labelleft=show_ylabel
                 )
         else:
             gl = ax.gridlines(
                 crs=self.transform,
-                linewidth=1, draw_labels=True,
+                linewidth=0.2, draw_labels=True,
                 color='grey', alpha=0.5, linestyle='--'
             )
             gl.top_labels = False
             gl.right_labels = False
-            gl.left_labels = show_ylabel,
-            gl.bottom_labels = show_xlabel,
-            gl.xlabel_style = {'size': 6, 'color': 'gray'}
-            gl.ylabel_style = {'size': 6, 'color': 'gray'}
+            gl.left_labels = show_ylabel
+            gl.bottom_labels = show_xlabel
+            gl.xlabel_style = {'size': self.base_fontsize*0.9, 'color': 'gray'}
+            gl.ylabel_style = {'size': self.base_fontsize*0.9, 'color': 'gray'}
         
         if "speed" in self.var_animate and hasattr(self, "arrows"):
             self._add_quiver_key(ax=ax, arrows = kwargs['arrows'])
             #qk.set_zorder(1)
 
-        annotate_title(ax, fontsize=7, **self.fig_text.__dict__)
+        annotate_title(ax, fontsize=self.base_fontsize, **self.fig_text.__dict__)
         if modelinfo:
-            annotate_model_setup_info(ax, fontsize=8, **self.fig_text.__dict__)
+            annotate_model_setup_info(ax, fontsize=self.base_fontsize, **self.fig_text.__dict__)
         if self.watermark:
-            annotate_watermark(ax=ax, text="Created by FarCoast v2")
-            annotate_dataowner(ax=ax, text="Firum")
+            annotate_watermark(ax=ax, fontsize=self.base_fontsize*2.5, text="Created by FarCoast v2")
+            annotate_dataowner(ax=ax, fontsize=self.base_fontsize*1.2, text="Firum")
+        
+        # Set the linewidth for each spine (top, bottom, left, right)
+        for spine in ax.spines.values():
+            spine.set_linewidth(0.5) # Set spine thickness to 2
         
         # TODO: not sure if this is needed?
         self.fig.subplots_adjust(bottom=0.15)
@@ -536,15 +571,26 @@ class farcoast_animation:
     def _draw_static_figure(
         self, data, resample=None, title=None, 
         ax=None, nrows=1, ncols=1, 
-        figsize=None, transform=None, modelinfo=True,
+        panel_size=None, unit="cm",
+        #figsize=None, 
+        wspace=0.02, hspace=0.02,
+        left=0.06, right=0.94, bottom=0.06, top=0.96,
+        transform=None, modelinfo=True,
         show_xlabel=True, show_ylabel=True, colorbar=True,
         **kwargs):
-        """General-purpose figure plotter for any static data array."""
+        """General-purpose figure plotter for any static data array.
+        
+        panel_size: (w, h) per panel in cm (default) or inches if unit='inch'
+        wspace/hspace: relative spacing between subplots (like plt.subplots_adjust)
+        margins: left/right/bottom/top in figure fraction
+        """
 
-        if figsize is None:
-            size = cm2inch(15*ncols, 15*nrows)
-        else:
-            size = cm2inch(figsize[0]*ncols, figsize[1]*nrows)
+        # if figsize is None:
+        #     size = cm2inch(15*ncols, 15*nrows)
+        # else:
+        #     size = cm2inch(figsize[0]*ncols, figsize[1]*nrows)
+
+        size = compute_figsize(nrows=nrows, ncols=ncols, panel_size=panel_size, unit=unit)
         
         # common kwargs
         common = dict(
@@ -598,7 +644,11 @@ class farcoast_animation:
 
         # Title
         if title:
-            axes[0].set_title(title, fontsize=10, color="black")
+            axes[0].set_title(title, fontsize=self.base_fontsize *1.1, color="black")
+        
+        # precise control of spacing
+        if (fig is not None):
+            fig.subplots_adjust(left=left, right=right, bottom=bottom, top=top, wspace=wspace, hspace=hspace)
 
         return fig, axes, transform
     
@@ -660,9 +710,18 @@ class farcoast_animation:
     def draw_frame(
         self, t_index, title=None, 
         ax=None, nrows=1, ncols=1, 
-        figsize=None, transform=None, silent=False, modelinfo=True, 
+        panel_size=None, unit="cm",
+        #figsize=None, 
+        wspace=0.02, hspace=0.02,
+        left=0.06, right=0.94, bottom=0.06, top=0.96,
+        transform=None, silent=False, modelinfo=True, 
         show_xlabel = True, show_ylabel = True, colorbar=True, **kwargs):
+        
         """Draws a single frame at a specific time index."""
+
+        # chatch
+        if not getattr(self, "_static_built", False):
+            self.build_static()
         
         data = self._timeslice(self.ds_mean, t_index)
         t0 = data.ocean_time.values
@@ -674,10 +733,15 @@ class farcoast_animation:
             resampled = self.resample.sel(ocean_time=t0)
         else:
             resampled = None
+
         title = title or f"Frame at {np.datetime_as_string(t0, 'h')}"
+        
         fig, ax, transform = self._draw_static_figure(
             data, resample=resampled, title=title, 
-            ax = ax, nrows=nrows, ncols=ncols, figsize=figsize, modelinfo=modelinfo, 
+            ax = ax, nrows=nrows, ncols=ncols, 
+            panel_size=panel_size, unit=unit, #figsize=figsize, 
+            wspace=wspace, hspace=hspace, left=left, right=right, bottom=bottom, top=top,
+            modelinfo=modelinfo, 
             show_xlabel = show_xlabel, show_ylabel = show_ylabel, colorbar=colorbar, **kwargs,
             )
         if silent:
@@ -685,14 +749,23 @@ class farcoast_animation:
         else:
             return fig, ax, transform
     
-    def draw_frames_grid(self, t_indices, nrows, ncols, figsize=None):
+    def draw_frames_grid(
+        self, t_indices, nrows, ncols, 
+        panel_size=None, unit="cm",
+        wspace=0.02, hspace=0.02,
+        left=0.06, right=0.94, bottom=0.06, top=0.96,
+        return_handles: bool = True,
+        **kwargs):
+
+        if not getattr(self, "_static_built", False):
+            self.build_static()
 
         fig, axes, transform = self.draw_frame(
-            t_index=t_indices[0], nrows=nrows, ncols=ncols, figsize=figsize,
-            modelinfo = False, show_ylabel=False, show_xlabel = False, colorbar = False)
-        # fig, axes, transform = self._draw_static_figure(
-        #     data=self._timeslice(self.ds_mean, t_indices[0]), ax=None, nrows=nrows, ncols=ncols, figsize=figsize,
-        #     modelinfo = False, show_ylabel=False, show_xlabel = False, colorbar = False)
+            t_index=t_indices[0], nrows=nrows, ncols=ncols, #figsize=figsize,
+            panel_size=panel_size, unit=unit,
+            wspace=wspace, hspace=hspace, left=left, right=right, bottom=bottom, top=top,
+            modelinfo = False, show_ylabel=False, show_xlabel = False, colorbar = False,
+            **kwargs)
 
         for i, (ax, t) in enumerate(zip(axes, t_indices)):
             # ax in last row or first column
@@ -700,18 +773,22 @@ class farcoast_animation:
             is_left   = (i %  ncols) == 0
             is_right = (i % ncols) == (ncols -1)
 
-            #ax.cla()
-            #ax.gridlines(draw_labels=False)
-
             self.draw_frame(
                 t_index=t, ax=ax, transform=transform, modelinfo = False, 
-                show_ylabel = is_left, show_xlabel = is_bottom, colorbar = is_right)
+                show_ylabel = is_left, show_xlabel = is_bottom, colorbar = is_right,
+                panel_size=panel_size, unit=unit, wspace=wspace, hspace=hspace,
+                left=left, right=right, bottom=bottom, top=top,
+                silet=True,
+                **kwargs)
 
         # 5) finalize
-        #fig.tight_layout()
+        fig.tight_layout()
         fig.canvas.draw()
+
+        if return_handles:
+            return fig, axes, transform
     
-    def draw_timeperiod_frame(self, t_index, reduce_func="mean", **kwargs):
+    def draw_timeperiod_frame(self, t_index, reduce_func="mean", return_handles = True, **test):
         """
         Draw a frame summarizing a time‐period slice using a reduction (mean, max, etc).
 
@@ -726,21 +803,28 @@ class farcoast_animation:
 
         # Extract and reduce main variable
         reducer = {
-            "mean": lambda x: x.mean(dim="ocean_time"),
+            "mean": lambda x: x.mean(dim="ocean_time", keep_attrs=True),
             #"max": lambda x: x.max(dim="ocean_time"),
             #"min": lambda x: x.min(dim="ocean_time"),
         }.get(reduce_func, reduce_func)
         
         data = reducer(data)
 
-        if self.var_animate == "speed":
+        if "speed" in self.var_animate:
             resampled = self._timeslice(self.resample, t_index)
             resampled = reducer(resampled)
         else:
             resampled = None
         # Title and render
         title = f"{reduce_func} from {np.datetime_as_string(t0, 'h')} to {np.datetime_as_string(t1, 'h')}"
-        self._draw_static_figure(data, resample=resampled, title=title, **kwargs)
+        fig, axes, transform = self._draw_static_figure(data = data, resample=resampled, title=title, **test)
+
+        # 5) finalize
+        fig.tight_layout()
+        fig.canvas.draw()
+
+        if return_handles:
+            return fig, axes, transform
 
     def draw_timeperiod_frame1(self, t_start, t_end, reduce_func = "mean"):
         """
@@ -778,7 +862,7 @@ class farcoast_animation:
             f"{reduce_func} from {np.datetime_as_string(t0, 'h')} to {np.datetime_as_string(t1, 'h')}",
             transform=self.ax.transAxes,
             ha='left', va='bottom',
-            fontsize=10,
+            fontsize=self.base_fontsize*1.1,
             style='italic',
             color='black',
             clip_on=False  # make sure it's not clipped by axes boundary
@@ -793,8 +877,8 @@ class farcoast_animation:
             v = reducer(self.resample[self.fig_text.v].sel(ocean_time=slice(t0, t1)))
             self.arrows.set_UVC(U=u, V=v)
 
-        self.fig.canvas.draw()
-        display(self.fig)
+        #self.fig.canvas.draw()
+        #display(self.fig)
 
     def to_jshtml(self):
         """Return HTML for embedding in Quarto or Jupyter."""
@@ -826,7 +910,7 @@ class farcoast_animation:
                 f'<video autoplay loop muted '
                 f'style="width:100%; height:auto; '
                 f'display:block; margin: -2px -2px -2px -2px; '
-                f'padding:0; border:none; putline:none;" '
+                f'padding:0; border:none; outline:none;" '
                 )
             }
         </div>
@@ -857,7 +941,7 @@ class farcoast_animation:
             loc="lower left",
             bbox_to_anchor=(1.0, 0.0, 1, 1),
             bbox_transform=ax.transAxes,
-            borderpad=0
+            borderpad=0,
         )
 
         # Decide colorbar extension mode
@@ -869,14 +953,28 @@ class farcoast_animation:
             extend = 'both'
         
         # Create and style colorbar
-        cbar = ax.figure.colorbar(mesh, cax=cax, orientation='vertical', extend=extend)
-        cbar.set_label(self.colorbar_label, labelpad=5, fontsize=10)
-        cbar.ax.tick_params(labelsize=6, color='grey')
+        cbar = ax.figure.colorbar(
+            mesh, cax=cax, orientation='vertical', 
+            extend=extend,
+            #drawedges=True,
+        )
+        cbar.set_label(
+            self.colorbar_label,
+            labelpad=5, 
+            fontsize=self.base_fontsize*0.9
+            )
+        cbar.ax.tick_params(
+            labelsize=self.base_fontsize*0.8, 
+            color='grey',
+            width=0.1,
+            pad = 0.1
+            )
+        cbar.outline.set_linewidth(0.1)
     
     def _prepare_data_subset_new(self, t_index=None):
         
         if t_index is None:
-            self.ocean_time_max = self.final_time_frame or self.ds.ocean_time.size
+            self.ocean_time_max = self.final_time_frame or self.ds.ocean_time.size - 1
             time_slice = slice(self.first_time_frame, self.ocean_time_max)
         else:
             time_slice = t_index
@@ -893,7 +991,6 @@ class farcoast_animation:
             depth_dim = "z"
             u_name, v_name = "u_rho_z", "v_rho_z"
             a, b = self.depth_slice
-            print(a, b)
             if a is not None:
                 i0 = int(ds_var.indexes[depth_dim].get_indexer([a], method="nearest")[0])
             else: 
@@ -902,7 +999,6 @@ class farcoast_animation:
                 i1 = int(ds_var.indexes[depth_dim].get_indexer([b], method="nearest")[0]) + 1
             else:
                 i1 = b
-            print(i0, i1)
             depth_slice = {depth_dim: slice(i0,i1)}
         else:
             raise ValueError("Depth dimension (s_rho or z) not found in variable.")
@@ -942,7 +1038,6 @@ class farcoast_animation:
             # VECTOR-MEAN u/v for arrows
             u_depthavg = u.mean(dim=depth_dim, skipna=True)
             v_depthavg = v.mean(dim=depth_dim, skipna=True)
-            print(u_depthavg.shape)
 
             # Rotate grid (ξ,η) -> geographic (E,N)
             # sometimes this is rotated differently, just be avare!!
@@ -966,7 +1061,6 @@ class farcoast_animation:
                     "ocean_time": ds_var["ocean_time"],
                 },
             ).load()
-            print(self.resample[u_name].shape)
 
             # Optional arrow masking
             if self.var_max is not None:
@@ -1000,7 +1094,7 @@ class farcoast_animation:
         - calculating mean over depth and storing in self.ds_mean
         """
         # size of ocean time
-        self.ocean_time_max = final_time_frame or self.ds.ocean_time.size
+        self.ocean_time_max = final_time_frame or self.ds.ocean_time.size - 1
         time_slice = slice(first_time_frame, self.ocean_time_max)
         
         # Determine depth dimension
@@ -1152,19 +1246,25 @@ class farcoast_animation:
         # build and return a fresh object
         return type(self)(**new_kwargs)
     
-    def build(self):
+    def build_static(self, fast=False, scale_from="first"):
         """
-        Explicitly build the first frame and the FuncAnimation.
-
-        Usage:
-            ani = farcoast_animation(..., write_output=False).build()
-            ani.embed_animation_responsive()
+        Build just the first styled frame (no FuncAnimation).
+        fast=True → only compute a single time step (keeps ocean_time dim = 1).
+        scale_from: "first" | "window"
         """
         # 1) prepare subset (time window, depth averaging, quiver fields)
-        self._prepare_data_subset_new(t_index=None)
+        if fast:
+            # single frame but keep the time dimension (size=1)
+            t0 = self.first_time_frame
+            self._prepare_data_subset_new(t_index=slice(t0, t0+1))
+        else:
+            # full time window
+            self._prepare_data_subset_new(t_index=None)
 
         # 2) set colormap and scaling from the prepared data
-        self._configure_colormap_and_scaling(self.ds_mean)
+        # choose scaling source (avoid scanning the whole window when fast)
+        ref = (self.ds_mean.isel(ocean_time=0) if scale_from == "first" else self.ds_mean)
+        self._configure_colormap_and_scaling(ref)
 
         # 3) draw first frame (image)
         self.image = self._plot_image(
@@ -1187,7 +1287,14 @@ class farcoast_animation:
         self._style_axes(self.ax, **inner_kwargs)
         self._add_colorbar(self.ax, self.image)
 
-        # 6) create the matplotlib.animation.FuncAnimation
-        self.animation = self.animate()
+        # flags
+        self._static_built = True
 
         return self
+    
+    def build_animation(self):
+        """Build static first; then create FuncAnimation."""
+        if not self._static_built:
+            self.build_static()
+        self.animation = self.animate()
+
