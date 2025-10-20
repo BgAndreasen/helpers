@@ -1,6 +1,48 @@
 import xarray as xr
 import numpy as np
 
+def to_center_masked(da, stag_dim, out_dim, mask_face=None, mode="extend", fill_value=np.nan):
+    """
+    Average a staggered field to centers along one axis with land-aware, one-sided handling.
+
+    - Land faces masked (mask_face==1 kept; others -> NaN) BEFORE averaging.
+        - One-sided average if only one neighbor is wet; NaN if neither is wet.
+        - `mode` controls only the *domain edges* (not land):
+            'extend'   -> replicate edge values
+            'fill'     -> constant pad with fill_value (e.g., 0.0)
+            'periodic' -> wrap endpoints
+        Returns: (centered_component, availability_mask_bool)
+    """
+    a = da if mask_face is None else da.where(mask_face == 1)
+
+    # pad along the staggered axis (domain edges only; won't cross land)
+    if mode == "extend":
+        p = a.pad({stag_dim: (1, 1)}, mode="edge")
+    elif mode == "fill":
+        p = a.pad({stag_dim: (1, 1)}, mode="constant", constant_values=fill_value)
+    elif mode == "periodic":
+        p = xr.concat([a.isel({stag_dim: -1}), a, a.isel({stag_dim: 0})], dim=stag_dim)
+    else:
+        raise ValueError("mode must be 'extend' | 'fill' | 'periodic'")
+
+    left  = p.isel({stag_dim: slice(0, -1)})
+    right = p.isel({stag_dim: slice(1,  None)})
+
+    nwet = (~xr.ufuncs.isnan(left)).astype(int) + (~xr.ufuncs.isnan(right)).astype(int)
+    s = xr.where(xr.ufuncs.isnan(left), 0, left) + xr.where(xr.ufuncs.isnan(right), 0, right)
+    comp = xr.where(nwet > 0, s / xr.where(nwet == 0, 1, nwet), np.nan)  # safe divide
+
+    # rename staggered axis to center axis on BOTH outputs
+    comp = comp.rename({stag_dim: out_dim})
+    avail = (nwet > 0).rename({stag_dim: out_dim}).astype(bool)
+    
+    return comp, avail
+
+def safe_rename(da, mapping):
+    """Rename only the dims that actually exist on the DataArray."""
+    mapping = {k: v for k, v in mapping.items() if k in da.dims}
+    return da.rename(mapping)
+
 class ROMSReader:
     """
     A class to load ROMS output, compute Z depths, interpolate to fixed Z depths,
@@ -26,22 +68,82 @@ class ROMSReader:
             compat="override",
             **open_kwargs
         )
-
-    def add_uv_to_rho_grid(self):
+    
+    def compute_uv_on_rho(self, mode_x="extend", mode_y="extend"):
         """
-        Interpolate U and V from their native C-grid onto the rho-grid.
-        Produces u_rho and v_rho on dims (ocean_time, s_rho, eta_rho, xi_rho)
-        and drops original C-grid coordinates
+        Compute u and v on rho points with mask-aware, one-sided interpolation,
+        then (optionally) |U|, and write back into self.ds.
+
+        A rho cell is considered valid if *either* component is available,
+        then speed uses the available components (NaN only if neither exists).
         """
         ds = self.ds
-        u_rho = ds.u.interp(eta_u=ds.eta_rho, xi_u=ds.xi_rho)
-        v_rho = ds.v.interp(eta_v=ds.eta_rho, xi_v=ds.xi_rho)
 
-        # assign and drop old C-grid coords
-        ds = ds.assign(u_rho=u_rho, v_rho=v_rho)
-        ds = ds.reset_coords(['eta_u','xi_u','eta_v','xi_v'], drop=True)
+        u = self.ds["u"]
+        v = self.ds["v"]
+        mu = self.ds.get("mask_u")
+        mv = self.ds.get("mask_v")
+        mr = self.ds.get("mask_rho")
+
+        # u -> rho (along xi)
+        u_rho, u_av = to_center_masked(u, "xi_u", "xi_rho", mask_face=mu, mode=mode_x)
+        # align the other horizontal dim to eta_rho if needed
+        u_rho = safe_rename(u_rho, {"eta_u": "eta_rho"})
+        u_av  = safe_rename(u_av,  {"eta_u": "eta_rho", "xi_u": "xi_rho"})
+
+        # v -> rho (along eta)
+        v_rho, v_av = to_center_masked(v, "eta_v", "eta_rho", mask_face=mv, mode=mode_y)
+        v_rho = safe_rename(v_rho, {"xi_v": "xi_rho"})
+        v_av  = safe_rename(v_av,  {"xi_v": "xi_rho", "eta_v": "eta_rho"})
+        
+        # enforce rho mask but don't lose cells where only one component exists
+        avail = u_av | v_av
+        if mr is not None:
+            avail = avail & (mr == 1)
+
+        u_rho = u_rho.where(u_av & avail)
+        v_rho = v_rho.where(v_av & avail)
+
+        # attrs for clarity
+        u_rho.name = "u_rho"
+        v_rho.name = "v_rho"
+        u_rho.attrs.update({"long_name": "u velocity on rho points", "units": u.attrs.get("units", "")})
+        v_rho.attrs.update({"long_name": "v velocity on rho points", "units": v.attrs.get("units", "")})
+
+        # write back
+        ds[u_rho.name] = u_rho
+        ds[v_rho.name] = v_rho
+        ds["uv_avail"] = avail
+
         self.ds = ds
         return self
+
+    
+    def compute_speed_on_rho(self):
+        
+        ds = self.ds
+
+        def _compute(U, V, name, mask=None):
+            sp = (U.fillna(0.0)**2 + V.fillna(0.0)**2) ** 0.5
+            if mask is not None:
+                sp = sp.where(mask)
+            sp.name = name
+
+            unit = U.attrs.get('units','') if U.attrs.get('units')==V.attrs.get('units') else ''
+            sp.attrs['units'] = unit
+            sp.attrs['long_name'] = 'horizontal speed at rho points'
+            return sp
+        
+        if 'u_rho' in ds and 'v_rho' in ds:
+            mask = ds.get("uv_avail", None)
+            ds['speed_rho'] = _compute(ds.u_rho, ds.v_rho, 'speed_rho', mask)
+        if 'u_rho_z' in ds and 'v_rho_z' in ds:
+            mask = ds.get("uv_avail", None)
+            ds['speed_rho_z'] = _compute(ds.u_rho_z, ds.v_rho_z, 'speed_rho_z', mask)
+        
+        self.ds = ds
+        return self
+
 
     def add_z_rho(self):
         """
@@ -112,7 +214,6 @@ class ROMSReader:
         for var in var_list:
             da = ds[var]
             
-
             # detect sigma dimension
             if 's_rho' in da.dims:
                 s_dim, z_coord = "s_rho", "z_rho"
@@ -148,25 +249,6 @@ class ROMSReader:
         self.ds = ds
         return self
 
-    def add_speed(self):
-        """
-        Add horizontal speed on sigma and z-grids when u_rho/v_rho or u_rho_z/v_rho_z exist.
-        """
-        ds = self.ds
-        def _compute(U, V, name):
-            sp = np.sqrt(U**2 + V**2)
-            unit = U.attrs.get('units','') if U.attrs.get('units')==V.attrs.get('units') else ''
-            sp = sp.rename(name)
-            sp.attrs['units'] = unit
-            sp.attrs['long_name'] = 'horizontal speed'
-            return sp
-        if 'u_rho' in ds and 'v_rho' in ds:
-            ds['speed_rho'] = _compute(ds.u_rho, ds.v_rho, 'speed_rho')
-        if 'u_rho_z' in ds and 'v_rho_z' in ds:
-            ds['speed_rho_z'] = _compute(ds.u_rho_z, ds.v_rho_z, 'speed_rho_z')
-        self.ds = ds
-        return self
-
     def process(self, var_list, z_new):
         """
         High-level pipeline: compute z_rho, z_w, u/v on rho-grid,
@@ -180,8 +262,25 @@ class ROMSReader:
             self
             .add_z_rho()
             .add_z_w()
-            .add_uv_to_rho_grid()
+            .compute_uv_on_rho()
             .interp_to_fixed_depths(var_list, z_new)
-            .add_speed()
+            .compute_speed_on_rho()
             .ds
         )
+    
+    def denser(self, var_list, factor=2):
+        """interpolate to denser grid"""
+
+        ds = self.ds
+
+        # factor=2 means ~2x finer in each horizontal direction
+        factor = 2
+        M = ds.sizes["xi_rho"]
+        N = ds.sizes["eta_rho"]
+
+        xi_fine  = np.linspace(0, M-1, M*factor)
+        eta_fine = np.linspace(0, N-1, N*factor)
+        
+        u_fine = ds.u_rho.interp(xi_rho=xi_fine, eta_rho=eta_fine, method="linear")
+        v_fine = ds.v_rho.interp(xi_rho=xi_fine, eta_rho=eta_fine, method="linear")
+
