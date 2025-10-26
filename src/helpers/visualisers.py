@@ -1032,6 +1032,7 @@ class farcoast_animation:
             # SCALAR-MEAN SPEED for mesh
             speed = np.sqrt(u**2 + v**2).mean(dim=depth_dim, skipna=True)
             speed.attrs["long_name"] = "Mean current speed (scalar average)"
+            #TODO: get units directly form ROMS, is it sometimes in cm/s
             speed.attrs["units"] = "m/s"
             self.ds_mean = speed.load()
 
@@ -1039,11 +1040,15 @@ class farcoast_animation:
             u_depthavg = u.mean(dim=depth_dim, skipna=True)
             v_depthavg = v.mean(dim=depth_dim, skipna=True)
 
+            # TODO: change rotation, since it has already been done in the importer
+
+
+
             # Rotate grid (ξ,η) -> geographic (E,N)
             # sometimes this is rotated differently, just be avare!!
             # TODO: is there a way to make sure this doesn't get buggered??
-            Ue = u_depthavg*np.cos(ang) - v_depthavg*np.sin(ang)   # eastward
-            Vn = u_depthavg*np.sin(ang) + v_depthavg*np.cos(ang)   # northward
+            #Ue = u_depthavg*np.cos(ang) - v_depthavg*np.sin(ang)   # eastward
+            #Vn = u_depthavg*np.sin(ang) + v_depthavg*np.cos(ang)   # northward
 
             quiver_step = self.quiver_every_x_box
             idx = dict(eta_rho=slice(None, None, quiver_step), xi_rho=slice(None, None, quiver_step))
@@ -1052,8 +1057,8 @@ class farcoast_animation:
             # TODO: there should be an option for no arrows!
             self.resample = xr.Dataset(
                 data_vars={
-                    u_name: Ue.isel(**idx),
-                    v_name: Vn.isel(**idx),
+                    u_name: u_depthavg.isel(**idx),
+                    v_name: v_depthavg.isel(**idx),
                 },
                 coords={
                     "lon_rho": ds_var["lon_rho"].isel(**idx),
