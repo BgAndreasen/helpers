@@ -43,6 +43,53 @@ def safe_rename(da, mapping):
     mapping = {k: v for k, v in mapping.items() if k in da.dims}
     return da.rename(mapping)
 
+def rotate_uv_to_geograpthic(U, V, angle):
+    ang = angle
+    if "units" in ang.attrs and "deg" in ang.attrs["units"].lower():
+        ang = xr.apply_ufunc(np.deg2rad, ang)
+        
+    # Rotate grid (ξ,η) -> geographic (E,N)
+    # sometimes this is rotated differently, just be avare!!
+    # TODO: is there a way to make sure this doesn't get buggered??
+    Ue = U*np.cos(ang) - V*np.sin(ang)   # eastward
+    Vn = U*np.sin(ang) + V*np.cos(ang)   # northward
+    return(Ue, Vn)
+
+def calc_principal_heading(u, v, tidal_mode=True):
+    """
+    This is an adaption of the function in the MHKit python package,
+    https://github.com/MHKiT-Software/MHKiT-Python
+
+    u, v : 2D numpy arrays with shape (time, depth)
+    Returns:
+      1D numpy array with shape (depth,)
+    """
+    # combine into complex
+    dt = u + 1j * v
+
+    if tidal_mode:
+        # flip negative imag
+        mask_neg = np.imag(dt) <= 0
+        dt = np.where(mask_neg, -dt, dt)
+
+        # double angles
+        angles = np.angle(dt)
+        dt = dt * np.exp(1j * angles)
+
+        # mask invalid
+        dt = np.where(np.isfinite(dt), dt, np.nan)
+
+        # mean over time‑axis (axis=0)
+        mean_dt = np.nanmean(dt, axis=0)
+        pang = np.angle(mean_dt) / 2
+    else:
+        mean_dt = np.nanmean(dt, axis=0)
+        pang = np.angle(mean_dt)
+
+    # to degrees, 0–360
+    p_heading = (np.rad2deg(pang) % 360).round(4)
+    return p_heading.astype(np.float32)
+
 class ROMSReader:
     """
     A class to load ROMS output, compute Z depths, interpolate to fixed Z depths,
@@ -107,13 +154,25 @@ class ROMSReader:
         # attrs for clarity
         u_rho.name = "u_rho"
         v_rho.name = "v_rho"
-        u_rho.attrs.update({"long_name": "u velocity on rho points", "units": u.attrs.get("units", "")})
-        v_rho.attrs.update({"long_name": "v velocity on rho points", "units": v.attrs.get("units", "")})
-
+        
         # write back
         ds[u_rho.name] = u_rho
         ds[v_rho.name] = v_rho
         ds["uv_avail"] = avail
+
+        # should the u_rho and v_rho, just be rotated here?
+        ds[u_rho.name], ds[v_rho.name] = rotate_uv_to_geograpthic(
+                U = ds[u_rho.name], V = ds[v_rho.name], angle = ds.angle
+            )
+        
+        ds.u_rho.attrs.update({
+            "long_name": "u velocity on rho points, rotated to geographic (E,N)",
+            "units": u.attrs.get("units", "")
+            })
+        ds.v_rho.attrs.update({
+            "long_name": "v velocity on rho points, rotated to geographic (E,N)",
+            "units": v.attrs.get("units", "")
+            })
 
         self.ds = ds
         return self
@@ -137,10 +196,11 @@ class ROMSReader:
         if 'u_rho' in ds and 'v_rho' in ds:
             mask = ds.get("uv_avail", None)
             ds['speed_rho'] = _compute(ds.u_rho, ds.v_rho, 'speed_rho', mask)
+
         if 'u_rho_z' in ds and 'v_rho_z' in ds:
             mask = ds.get("uv_avail", None)
             ds['speed_rho_z'] = _compute(ds.u_rho_z, ds.v_rho_z, 'speed_rho_z', mask)
-        
+
         self.ds = ds
         return self
 
@@ -248,6 +308,7 @@ class ROMSReader:
 
         self.ds = ds
         return self
+
 
     def process(self, var_list, z_new):
         """
