@@ -1,7 +1,14 @@
 import xarray as xr
 import numpy as np
+import glob
+from ladim.gridforce.ROMS import Grid
 
-def to_center_masked(da, stag_dim, out_dim, mask_face=None, mode="extend", fill_value=np.nan):
+def to_center_masked(
+    da, stag_dim, 
+    out_dim, 
+    out_coord=None, 
+    mask_face=None, mode="extend", fill_value=np.nan
+    ):
     """
     Average a staggered field to centers along one axis with land-aware, one-sided handling.
 
@@ -24,6 +31,9 @@ def to_center_masked(da, stag_dim, out_dim, mask_face=None, mode="extend", fill_
         p = xr.concat([a.isel({stag_dim: -1}), a, a.isel({stag_dim: 0})], dim=stag_dim)
     else:
         raise ValueError("mode must be 'extend' | 'fill' | 'periodic'")
+    
+    # give the padded axis a unique, positional index (0..N-1)
+    p = p.assign_coords({stag_dim: np.arange(p.sizes[stag_dim], dtype=np.int64)})
 
     left  = p.isel({stag_dim: slice(0, -1)})
     right = p.isel({stag_dim: slice(1,  None)})
@@ -35,6 +45,29 @@ def to_center_masked(da, stag_dim, out_dim, mask_face=None, mode="extend", fill_
     # rename staggered axis to center axis on BOTH outputs
     comp = comp.rename({stag_dim: out_dim})
     avail = (nwet > 0).rename({stag_dim: out_dim}).astype(bool)
+
+    # --- NORMALIZE LENGTH to stag_len + 1 (rho count) ---
+    expected = da.sizes[stag_dim] + 1
+    # Sometimes, depending on earlier ops, comp/avail can be one short or one long — fix here:
+    if comp.sizes[out_dim] != expected:
+        # Trim or pad (pad with NaN/False at the end) to expected length
+        if comp.sizes[out_dim] > expected:
+            slicer = {out_dim: slice(0, expected)}
+            comp  = comp.isel(slicer)
+            avail = avail.isel(slicer)
+        else:  # shorter than expected: pad to the right
+            need = expected - comp.sizes[out_dim]
+            pad_kwargs = {out_dim: (0, need)}
+            comp  = comp.pad(pad_kwargs, mode="constant", constant_values=np.nan)
+            avail = avail.pad(pad_kwargs, mode="constant", constant_values=False)
+
+    # --- Assign the true rho coordinates (size now guaranteed to match) ---
+    if out_coord is not None:
+        coord = out_coord
+        if coord.size != expected:
+            coord = coord.isel({out_dim: slice(0, expected)})
+        comp  = comp.assign_coords({out_dim: coord})
+        avail = avail.assign_coords({out_dim: coord})
     
     return comp, avail
 
@@ -115,7 +148,70 @@ class ROMSReader:
             compat="override",
             **open_kwargs
         )
+
+        self.grid_file = glob.glob(files)[0]
+
+        
+        # maybe just stupid!! avoidable using pyproj and projection sting??
+        config = dict(
+                        gridforce=dict(
+                            grid_file=self.grid_file,
+                        ),
+                    )
+        self.grid = Grid(config)
+
+    def _time_name(self):
+        return "ocean_time" if "ocean_time" in self.ds.dims else "time"
     
+    def attach_rho_coords(self, var):
+        """Ensure var has global rho coords (no rebasing)."""
+        ds = self.ds
+        t = self._time_name()
+        return (
+            var.assign_coords({
+                t: ds.coords[t],
+                "s_rho": ds.coords["s_rho"],
+                "eta_rho": ds.coords["eta_rho"],
+                "xi_rho":  ds.coords["xi_rho"],
+            })
+            .transpose(t, "s_rho", "eta_rho", "xi_rho")
+        )
+
+    def attach_rho_coords_z(self, var):
+        """For fixed-z outputs: keep global rho coords + 'z' axis."""
+        ds = self.ds
+        t = self._time_name()
+        return (
+            var.assign_coords({
+                t: ds.coords[t],
+                "eta_rho": ds.coords["eta_rho"],
+                "xi_rho":  ds.coords["xi_rho"],
+            })
+            .transpose(t, "z", "eta_rho", "xi_rho")
+        )
+    
+    def _attach_rho_coords_mask(self, da):
+        t = "ocean_time" if "ocean_time" in self.ds.dims else "time"
+        # drop any U/V lon/lat carried over
+        drop2d = [c for c in ("lon_u","lat_u","lon_v","lat_v") if c in da.coords]
+        if drop2d:
+            da = da.drop_vars(drop2d)
+        
+        # slice ds coords to match THIS array's sizes
+        xi = self.ds["xi_rho"].isel(xi_rho=slice(0, da.sizes["xi_rho"]))
+        eta = self.ds["eta_rho"].isel(eta_rho=slice(0, da.sizes["eta_rho"]))
+
+        return (
+            da.assign_coords({
+                t: self.ds.coords[t],
+                "s_rho":   self.ds.coords["s_rho"],
+                "eta_rho": eta,
+                "xi_rho":  xi,
+            })
+            .transpose(t, "s_rho", "eta_rho", "xi_rho")
+            .astype(bool)
+        )
+
     def compute_uv_on_rho(self, mode_x="extend", mode_y="extend"):
         """
         Compute u and v on rho points with mask-aware, one-sided interpolation,
@@ -125,40 +221,123 @@ class ROMSReader:
         then speed uses the available components (NaN only if neither exists).
         """
         ds = self.ds
+        t = "ocean_time" if "ocean_time" in ds.dims else "time"
 
-        u = self.ds["u"]
-        v = self.ds["v"]
-        mu = self.ds.get("mask_u")
-        mv = self.ds.get("mask_v")
-        mr = self.ds.get("mask_rho")
+        u = ds["u"]
+        v = ds["v"]
+        mu = ds.get("mask_u")
+        mv = ds.get("mask_v")
+        mr = ds.get("mask_rho")
+
+        # --- DEBUG ASSERTIONS: INPUT C-GRID CONSISTENCY --------------------------
+
+        # Check staggered dims exist
+        assert 'eta_u' in u.dims and 'xi_u' in u.dims, "u missing eta_u/xi_u"
+        assert 'eta_v' in v.dims and 'xi_v' in v.dims, "v missing eta_v/xi_v"
+
+        # Check C-grid shape relationships
+        assert ds.sizes['xi_u']   == ds.sizes['xi_rho'] - 1, \
+            f"xi_u wrong size: xi_u={ds.sizes['xi_u']} vs xi_rho-1={ds.sizes['xi_rho']-1}"
+
+        assert ds.sizes['eta_v']  == ds.sizes['eta_rho'] - 1, \
+            f"eta_v wrong size: eta_v={ds.sizes['eta_v']} vs eta_rho-1={ds.sizes['eta_rho']-1}"
+
+        assert ds.sizes['xi_v']   == ds.sizes['xi_rho'], \
+            f"xi_v wrong size: xi_v={ds.sizes['xi_v']} vs xi_rho={ds.sizes['xi_rho']}"
+
+        assert ds.sizes['eta_u']  == ds.sizes['eta_rho'], \
+            f"eta_u wrong size: eta_u={ds.sizes['eta_u']} vs eta_rho={ds.sizes['eta_rho']}"
 
         # u -> rho (along xi)
-        u_rho, u_av = to_center_masked(u, "xi_u", "xi_rho", mask_face=mu, mode=mode_x)
+        u_rho, u_av = to_center_masked(
+            u, "xi_u", "xi_rho",
+            out_coord=ds["xi_rho"],
+            mask_face=mu, mode=mode_x
+            )
         # align the other horizontal dim to eta_rho if needed
         u_rho = safe_rename(u_rho, {"eta_u": "eta_rho"})
         u_av  = safe_rename(u_av,  {"eta_u": "eta_rho", "xi_u": "xi_rho"})
 
         # v -> rho (along eta)
-        v_rho, v_av = to_center_masked(v, "eta_v", "eta_rho", mask_face=mv, mode=mode_y)
+        v_rho, v_av = to_center_masked(
+            v, "eta_v", "eta_rho", 
+            out_coord=ds["eta_rho"],
+            mask_face=mv, mode=mode_y
+            )
         v_rho = safe_rename(v_rho, {"xi_v": "xi_rho"})
         v_av  = safe_rename(v_av,  {"xi_v": "xi_rho", "eta_v": "eta_rho"})
-        
-        # enforce rho mask but don't lose cells where only one component exists
-        avail = u_av | v_av
-        if mr is not None:
-            avail = avail & (mr == 1)
 
-        u_rho = u_rho.where(u_av & avail)
-        v_rho = v_rho.where(v_av & avail)
+        u_rho = u_rho.transpose(t, "s_rho", "eta_rho", "xi_rho")
+        u_av  = u_av .transpose(t, "s_rho", "eta_rho", "xi_rho")
+        v_rho = v_rho.transpose(t, "s_rho", "eta_rho", "xi_rho")
+        v_av  = v_av .transpose(t, "s_rho", "eta_rho", "xi_rho")
+
+        # --- DEBUG ASSERTIONS: OUTPUT FROM to_center_masked ----------------------
+
+        # 1. Check that output dims exist
+        assert 'eta_rho' in u_rho.dims, "u_rho missing eta_rho after rename"
+        assert 'xi_rho' in u_rho.dims,  "u_rho missing xi_rho after rename"
+        assert 'eta_rho' in v_rho.dims, "v_rho missing eta_rho after rename"
+        assert 'xi_rho' in v_rho.dims,  "v_rho missing xi_rho after rename"
+
+        # 2. Check that u_rho and v_rho dimensions match the target grid
+        eta_u = u_rho.sizes['eta_rho']
+        eta_v = v_rho.sizes['eta_rho']
+        xi_u  = u_rho.sizes['xi_rho']
+        xi_v  = v_rho.sizes['xi_rho']
+
+        assert eta_u == eta_v, \
+            f"eta_rho mismatch after to_center_masked: u={eta_u}, v={eta_v}"
+
+        assert xi_u == xi_v, \
+            f"xi_rho mismatch after to_center_masked: u={xi_u}, v={xi_v}"
+
+        # 3. Check they match the dataset's coordinate sizes
+        assert eta_u == ds.sizes['eta_rho'], \
+            f"u_rho eta_rho={eta_u}, expected={ds.sizes['eta_rho']}"
+
+        assert xi_u == ds.sizes['xi_rho'], \
+            f"u_rho xi_rho={xi_u}, expected={ds.sizes['xi_rho']}"
+        
+        uv_avail = (xr.ufuncs.isfinite(u_rho) | xr.ufuncs.isfinite(v_rho)).astype(bool)
+        uv_avail.name = "uv_avail"
+
+        # enforce rho mask but don't lose cells where only one component exists
+        #avail = u_av | v_av
+        #avail = (u_av | v_av)
+        # if mr is not None:
+        #    avail = avail & (mr ==1)
+        if mr is not None:
+            mr = (mr == 1)
+            u_rho = u_rho.where(mr)
+            v_rho = v_rho.where(mr)
+            uv_avail = uv_avail & mr
+
+        # 3) align on the UNION of their domains (keep cells where only one exists)
+        # u_rho, v_rho = xr.align(u_rho, v_rho, join="outer", fill_value=np.nan)
+
+        #  # 4) availability: where at least one component exists
+        # u_ok = xr.ufuncs.isfinite(u_rho)
+        # v_ok = xr.ufuncs.isfinite(v_rho)
+        # uv_avail = (u_ok | v_ok).astype("bool")
+        # uv_avail.name = "uv_avail"
+
+        #u_rho = u_rho.where(u_av & avail)
+        #v_rho = v_rho.where(v_av & avail)
 
         # attrs for clarity
         u_rho.name = "u_rho"
         v_rho.name = "v_rho"
+
+        # attach global coordinates
+        #u_rho = self.attach_rho_coords(u_rho)
+        #v_rho = self.attach_rho_coords(v_rho)
+        #avail = self.attach_rho_coords(avail)
         
         # write back
         ds[u_rho.name] = u_rho
         ds[v_rho.name] = v_rho
-        ds["uv_avail"] = avail
+        ds["uv_avail"] = uv_avail
 
         # should the u_rho and v_rho, just be rotated here?
         ds[u_rho.name], ds[v_rho.name] = rotate_uv_to_geograpthic(
@@ -175,6 +354,114 @@ class ROMSReader:
             })
 
         self.ds = ds
+
+        return self
+    
+    def sample_around_stations(self, station_df, padding=4):
+        
+        """
+        station_df has station, lon, lat in wgs84
+        select an area around the station (padding) to get 
+        enough data to do the rest of the calculations.
+
+        save the original i, j, to reasign them.
+        """
+        ds = self.ds
+        df = station_df
+        extend_boundary = int(padding)
+
+        # indexing
+        eta_min, eta_max = ds.eta_rho.min(), ds.eta_rho.max()
+        xi_min, xi_max = ds.xi_rho.min(), ds.xi_rho.max()
+
+        self.ij_raw = [xi_min, eta_min]
+
+        # X and Y coordinates in the FarCoast file from the lon, lat of the current measurements
+        xx, yy = self.grid.ll2xy(df.lon,df.lat)
+        
+        # set up xarray that includes stations we want to interpolate to
+        xr_stations = xr.Dataset(
+            data_vars=dict(
+                x = (["station"], xx),
+                y = (["station"], yy),
+            ),
+            coords=dict(
+                station = (["station"], df.station),
+            )
+        )
+
+        self.xr_stations = xr_stations
+
+        #nx_r, ny_r = ds.sizes["xi_rho"], ds.sizes["eta_rho"]
+        
+        # compute inclusive rho-window first, with padding
+        i0 = max(int(np.floor(xr_stations.x)) - extend_boundary, 0)
+        i1 = min(int(np.ceil (xr_stations.x)) + extend_boundary, ds.sizes["xi_rho"]  - 1)
+        j0 = max(int(np.floor(xr_stations.y)) - extend_boundary, 0)
+        j1 = min(int(np.ceil (xr_stations.y)) + extend_boundary, ds.sizes["eta_rho"] - 1)
+        
+        self.ij_crop = [i0, j0]
+
+        ds = ds.isel(
+            xi_rho = slice(i0, i1 + 1),
+            eta_rho = slice(j0, j1 + 1),
+            xi_u = slice(i0, i1),
+            eta_u = slice(j0, j1 + 1),
+            xi_v = slice(i0, i1 + 1),
+            eta_v = slice(j0, j1),
+            xi_psi = slice(i0,i1),
+            eta_psi = slice(j0, j1)
+        )
+
+        # REBASE coords to 0..N-1 so they match what to_center_masked will use
+        ds = ds.assign_coords(
+            xi_rho  = ("xi_rho",  np.arange(ds.sizes["xi_rho"],  dtype=np.int64)),
+            eta_rho = ("eta_rho", np.arange(ds.sizes["eta_rho"], dtype=np.int64)),
+            xi_u    = ("xi_u",    np.arange(ds.sizes["xi_u"],    dtype=np.int64)),
+            eta_u   = ("eta_u",   np.arange(ds.sizes["eta_u"],   dtype=np.int64)),
+            xi_v    = ("xi_v",    np.arange(ds.sizes["xi_v"],    dtype=np.int64)),
+            eta_v   = ("eta_v",   np.arange(ds.sizes["eta_v"],   dtype=np.int64)),
+            xi_psi  = ("xi_psi",  np.arange(ds.sizes["xi_psi"],  dtype=np.int64)),
+            eta_psi = ("eta_psi", np.arange(ds.sizes["eta_psi"], dtype=np.int64)),
+        )
+
+        # 4) Sanity check the C-grid relationships
+        assert ds.sizes["xi_u"]   == ds.sizes["xi_rho"] - 1
+        assert ds.sizes["eta_v"]  == ds.sizes["eta_rho"] - 1
+        assert ds.sizes["xi_psi"] == ds.sizes["xi_rho"] - 1
+        assert ds.sizes["eta_psi"]== ds.sizes["eta_rho"] - 1
+        
+        self.ds = ds
+        return self
+    
+    def sample_stations(self):
+
+        """
+        station_df has station, lon, lat in wgs84
+        """
+        ds = self.ds
+        xr_stations = self.xr_stations
+
+        xi_global, eta_global = xr_stations.x, xr_stations.y
+        i0_raw, j0_raw = self.ij_raw
+        i0_crop, j0_crop = self.ij_crop
+        xi_local = xi_global - (i0_crop - i0_raw)
+        eta_local = eta_global - (j0_crop - j0_raw)
+
+        # create station file from the FarCoast files
+        ds_stations = ds.interp(
+            xi_rho = xi_local, 
+            eta_rho = eta_local,
+            method="linear"
+        ).fillna(
+            ds.interp(
+                xi_rho = xi_local, 
+                eta_rho = eta_local,
+                method="nearest"
+            )
+        )
+        
+        self.ds_stations = ds_stations
         return self
 
     
@@ -198,7 +485,7 @@ class ROMSReader:
             ds['speed_rho'] = _compute(ds.u_rho, ds.v_rho, 'speed_rho', mask)
 
         if 'u_rho_z' in ds and 'v_rho_z' in ds:
-            mask = ds.get("uv_avail", None)
+            mask = ds.get("uv_avail_z", None)
             ds['speed_rho_z'] = _compute(ds.u_rho_z, ds.v_rho_z, 'speed_rho_z', mask)
 
         self.ds = ds
@@ -302,14 +589,63 @@ class ROMSReader:
                 .transpose("ocean_time","z","eta_rho","xi_rho")
                 .rename(f"{var}_z")
             )
+            # re-attach global rho coords
+            #da_z = self.attach_rho_coords_z(da_z)
             # re‐copy attrs from the original
             da_z.attrs = da.attrs
             ds[var + "_z"] = da_z
+        
+        # create u and v availability mask
+        if "uv_avail" in ds:
+            if "z_rho" in ds:
+                z_coord = "z_rho"
+                s_dim = "s_rho"
+            elif "z_w" in ds:
+                z_coord = "z_w"
+                s_dim = "s_w"
+            else:
+                raise ValueError("Cannot build uv_avail_z: no z_rho or z_w in dataset.")
+            
+            mask_sigma = ds["uv_avail"].astype(float)
+
+            mask_z = xr.apply_ufunc(
+                _interp,
+                mask_sigma,
+                ds[z_coord],
+                z_da,
+                input_core_dims=[[s_dim], [s_dim], ["z"]],
+                output_core_dims=[["z"]],
+                vectorize=True,
+                dask="parallelized",
+                dask_gufunc_kwargs={"output_sizes": {"z": z_arr.size}},
+                output_dtypes=[float],
+            )
+
+            # back to bool — 0/1 interpolation will give you values in between
+            mask_z = (mask_z > 0.5)
+            mask_z = (
+                mask_z
+                .assign_coords(z=("z", z_arr))
+                .transpose("ocean_time", "z", "eta_rho", "xi_rho")
+                .rename("uv_avail_z")
+            )
+
+            # re-attach global rho coords
+            #mask_z = self.attach_rho_coords_z(mask_z)
+
+            ds["uv_avail_z"] = mask_z
 
         self.ds = ds
         return self
+    
+    def persist_here(self, tag=None):
+        self.ds = self.ds.persist()
+        return self
 
-
+    def compute_here(self, tag=None):
+        self.ds = self.ds.compute()
+        return self
+    
     def process(self, var_list, z_new):
         """
         High-level pipeline: compute z_rho, z_w, u/v on rho-grid,
@@ -328,6 +664,33 @@ class ROMSReader:
             .compute_speed_on_rho()
             .ds
         )
+
+
+    def process_stations(self, stations_df, var_list, z_new, padding=4):
+        """
+        High-level pipeline: 
+        slice around stations 
+        compute z_rho, z_w, u/v on rho-grid,
+        interpolate to fixed depths, and add speed.
+        select specific stations
+
+        Returns
+        -------
+        xarray.Dataset
+        """
+        return (
+            self
+            .sample_around_stations(stations_df, padding)
+            .persist_here()
+            .add_z_rho()
+            .add_z_w()
+            .compute_uv_on_rho()
+            .interp_to_fixed_depths(var_list, z_new)
+            .compute_speed_on_rho()
+            .sample_stations()
+            .ds
+        )
+        
     
     def denser(self, var_list, factor=2):
         """interpolate to denser grid"""
