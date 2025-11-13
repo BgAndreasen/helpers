@@ -12,5 +12,9 @@ dependencies = [
     "numpy >= 1.23",
     "xarray[complete]",
     "cmocean",
-    "geopandas"
+    "geopandas",
+    "cartopy"
 ]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
