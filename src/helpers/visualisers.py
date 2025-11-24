@@ -160,6 +160,7 @@ class farcoast_animation:
         save_folder = "gifs/",
         bathy_path = "../data/geodata/dybsimplified/",
         coastline_path = "../data/geodata/lendiskort.gdb/",
+        aquaculture_path = None,
         stations = None,
         null_proj = False,
         base_fontsize = 7,
@@ -200,6 +201,7 @@ class farcoast_animation:
             output_type=output_type,
             save_folder=save_folder,
             bathy_path=bathy_path,
+            aquaculture_path=aquaculture_path,
             coastline_path=coastline_path,
             null_proj=null_proj,
             stations=stations,
@@ -256,14 +258,16 @@ class farcoast_animation:
                 fjord_ymin, fjord_xmax = (62.14, -6.63)
             elif boundary == "TRO":
                 # Trongisvág boundary
-                fjord_ymax, fjord_xmin = (61.56, -6.84)
-                fjord_ymin, fjord_xmax = (61.51, -6.72)
+                fjord_ymax, fjord_xmin = (61.57, -6.85)
+                fjord_ymin, fjord_xmax = (61.515, -6.71)
             else:
                 raise Exception(f'{self.boundary} is not defined in function')
         
         # read gdb and shape files
         self.geo_coastline = gpd.read_file(self.coastline_path, layer = 'oyggjar')
         self.geo_bathy = gpd.read_file(self.bathy_path, layer = 'dyb')
+        if self.aquaculture_path is not None:
+            self.geo_aquac = gpd.read_file(self.aquaculture_path, layer = 'aling_alioki')
         if self.stations is not None:
             self.stations = gpd.GeoDataFrame(
                 self.stations,
@@ -277,6 +281,8 @@ class farcoast_animation:
             map_proj_transform_label = f"EPSG {epsg}"
             self.geo_coastline = self.geo_coastline.to_crs(epsg=epsg_org)
             self.geo_bathy = self.geo_bathy.to_crs(epsg=epsg_org)
+            if self.aquaculture_path is not None:
+                self.geo_aquac = self.geo_aquac.to_crs(epsg=epsg_org)
             if self.stations is not None:
                 self.stations = self.stations.to_crs(epsg=epsg_org)
             epsg_filename = epsg_org
@@ -285,6 +291,8 @@ class farcoast_animation:
             map_proj_transform_label = f"EPSG {epsg}"
             self.geo_coastline = self.geo_coastline.to_crs(epsg=epsg)
             self.geo_bathy = self.geo_bathy.to_crs(epsg=epsg)
+            if self.aquaculture_path is not None:
+                self.geo_aquac = self.geo_aquac.to_crs(epsg=epsg)
             if self.stations is not None:
                 self.stations = self.stations.to_crs(epsg=epsg)
             epsg_filename = epsg
@@ -454,7 +462,7 @@ class farcoast_animation:
             zorder=70,
         )
     
-    def _add_quiver_key(self, ax, arrows, x=0.1, y=0.08):
+    def _add_quiver_key(self, ax, arrows, x=0.2, y=0.08):
         if self.quiver_max is None:
             veclength = 0.5
         else:
@@ -468,7 +476,7 @@ class farcoast_animation:
                 U=veclength,
                 label=label,
                 labelpos='S',
-                labelsep=0.004,
+                labelsep=0.01,
                 coordinates='axes',
                 zorder = 70
                 )
@@ -512,6 +520,8 @@ class farcoast_animation:
         self.geo_coastline.boundary.plot(ax=ax, edgecolor='grey', linewidth=0.2)
         self.geo_coastline.plot(ax=ax, color='lightgrey', alpha=0.8, zorder=50)
         self.geo_bathy.plot(ax=ax, linewidth=0.1, color='darkgrey')
+        if self.aquaculture_path is not None:
+            self.geo_aquac.plot(ax=ax, edgecolor="cyan", linewidth=0.2)
    
         # set up plot parameters
         mpl.rcParams["font.size"] = self.base_fontsize
@@ -523,7 +533,7 @@ class farcoast_animation:
 
         # add stations
         if self.stations is not None:
-            self.stations.plot(ax=ax, color='black', edgecolor = "black", zorder = 50)
+            self.stations.plot(ax=ax, color='red', edgecolor = "firebrick", zorder = 90)
         
 
         # Projection-specific gridlines or ticks
