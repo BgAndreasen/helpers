@@ -149,6 +149,11 @@ class ROMSReader:
             **open_kwargs
         )
 
+        # remove duplicate ocean_time, happens if model was restarted
+        time_index = self.ds.get_index("ocean_time")
+        mask = ~time_index.duplicated(keep="first")
+        self.ds = self.ds.isel(ocean_time=mask)
+
         self.grid_file = glob.glob(files)[0]
 
         
