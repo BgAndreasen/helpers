@@ -236,9 +236,9 @@ class farcoast_animation:
         if boundary is None:
             fjord_ymax, fjord_xmin = (self.ds.lon_rho.min(), self.ds.lat_rho.min())
             fjord_ymin, fjord_xmax = (self.ds.lon_rho.max(), self.ds.lat_rho.max())
-            use_manual_boundaries = False
+            self.use_manual_boundaries = False
         else:
-            use_manual_boundaries = True
+            self.use_manual_boundaries = True
         
             if boundary == "VES":
                 # Vestmanna boundary
@@ -278,24 +278,24 @@ class farcoast_animation:
         # make sure everything is in the same projection
         if self.null_proj:
             self.map_proj = self.map_proj_original
-            map_proj_transform_label = f"EPSG {epsg}"
+            #map_proj_transform_label = f"EPSG {epsg}"
             self.geo_coastline = self.geo_coastline.to_crs(epsg=epsg_org)
             self.geo_bathy = self.geo_bathy.to_crs(epsg=epsg_org)
             if self.aquaculture_path is not None:
                 self.geo_aquac = self.geo_aquac.to_crs(epsg=epsg_org)
             if self.stations is not None:
                 self.stations = self.stations.to_crs(epsg=epsg_org)
-            epsg_filename = epsg_org
+            self.epsg_filename = epsg_org
         else:
             self.map_proj = ccrs.epsg(epsg)
-            map_proj_transform_label = f"EPSG {epsg}"
+            #map_proj_transform_label = f"EPSG {epsg}"
             self.geo_coastline = self.geo_coastline.to_crs(epsg=epsg)
             self.geo_bathy = self.geo_bathy.to_crs(epsg=epsg)
             if self.aquaculture_path is not None:
                 self.geo_aquac = self.geo_aquac.to_crs(epsg=epsg)
             if self.stations is not None:
                 self.stations = self.stations.to_crs(epsg=epsg)
-            epsg_filename = epsg
+            self.epsg_filename = epsg
 
         # set the min and max used for axes
         self.fxmin, self.fymin = self.map_proj.transform_point(x=fjord_xmin, y=fjord_ymin, src_crs=self.map_proj_original)
@@ -314,7 +314,7 @@ class farcoast_animation:
         # write the plot in location specified
         # TODO: take this out of init
         if(write_output):
-            if(use_manual_boundaries):
+            if(self.use_manual_boundaries):
                 boundary = "bbox_"
             else:
                 boundary = ""
@@ -337,7 +337,7 @@ class farcoast_animation:
             if "speed" in self.var_animate:
                 filename = f"{filename}_quiver{self.quiver_every_x_box}"
             
-            filename = f"{filename}_epsg{epsg_filename}"
+            filename = f"{filename}_epsg{self.epsg_filename}"
 
             if self.output_type == "gif":
                 filename = f"{filename}.gif"
@@ -939,6 +939,72 @@ class farcoast_animation:
             dpi = self.dpi
 
         self.animation.save(filename, fps=fps, dpi=dpi)
+    
+    def _default_animation_filename(self, file_type="gif"):
+        boundary = "bbox_" if self.use_manual_boundaries else ""
+
+        if not any(self.depth_slice):
+            filename = (
+                f"{self.save_folder}ROMS_func_animation_{boundary}{self.fig_text.attr_file}"
+                f"_time{self.first_time_frame}to{self.final_time_frame}"
+                f"_{self.var_animate}_covers_{self.var_percentile}_dpi{self.dpi}"
+            )
+        else:
+            depths = "".join(map(str, self.depth_slice))
+            filename = (
+                f"{self.save_folder}ROMS_func_animation_{boundary}{self.fig_text.attr_file}"
+                f"_time{self.first_time_frame}to{self.final_time_frame}"
+                f"_{self.var_animate}_depth{depths}_covers_{self.var_percentile}_dpi{self.dpi}"
+            )
+
+        if "speed" in self.var_animate:
+            filename = f"{filename}_quiver{self.quiver_every_x_box}"
+
+        filename = f"{filename}_epsg{self.epsg_filename}"
+
+        if file_type == "gif":
+            filename += ".gif"
+        elif file_type == "html":
+            filename += ".html"
+
+        return filename
+    
+    def save_animation(self, filename=None, file_type="gif", fps=None, dpi=None, close_fig=True):
+
+        if self.animation is None:
+            raise ValueError(
+                "No animation exists yet. Run make_animation() before save_animation()."
+            )
+
+        if filename is None:
+            filename = self._default_animation_filename(file_type)
+
+        if fps is None:
+            fps = self.fps
+        if dpi is None:
+            dpi = self.dpi
+
+        if file_type == "gif":
+            self.animation.save(
+                filename=filename,
+                fps=fps,
+                writer="pillow",
+                dpi=dpi,
+                #savefig_kwargs={"bbox_inches": "tight"},
+            )
+
+        elif file_type == "html":
+            html = self.animation.to_jshtml()
+            with open(filename, "w") as f:
+                f.write(html)
+
+        else:
+            raise ValueError("file_type must be 'gif' or 'html'")
+
+        if close_fig:
+            plt.close(self.fig)
+
+        return filename
     
     
     def _add_colorbar(self, ax, mesh):
