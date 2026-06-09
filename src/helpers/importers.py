@@ -400,10 +400,20 @@ class ROMSReader:
         #nx_r, ny_r = ds.sizes["xi_rho"], ds.sizes["eta_rho"]
         
         # compute inclusive rho-window first, with padding
-        i0 = max(int(np.floor(xr_stations.x)) - extend_boundary, 0)
-        i1 = min(int(np.ceil (xr_stations.x)) + extend_boundary, ds.sizes["xi_rho"]  - 1)
-        j0 = max(int(np.floor(xr_stations.y)) - extend_boundary, 0)
-        j1 = min(int(np.ceil (xr_stations.y)) + extend_boundary, ds.sizes["eta_rho"] - 1)
+        # i0 = max(int(np.floor(xr_stations.x)) - extend_boundary, 0)
+        # i1 = min(int(np.ceil (xr_stations.x)) + extend_boundary, ds.sizes["xi_rho"]  - 1)
+        # j0 = max(int(np.floor(xr_stations.y)) - extend_boundary, 0)
+        # j1 = min(int(np.ceil (xr_stations.y)) + extend_boundary, ds.sizes["eta_rho"] - 1)
+        x_min = float(xr_stations.x.min())
+        x_max = float(xr_stations.x.max())
+        y_min = float(xr_stations.y.min())
+        y_max = float(xr_stations.y.max())
+
+        i0 = max(int(np.floor(x_min)) - extend_boundary, 0)
+        i1 = min(int(np.ceil(x_max)) + extend_boundary, ds.sizes["xi_rho"] - 1)
+
+        j0 = max(int(np.floor(y_min)) - extend_boundary, 0)
+        j1 = min(int(np.ceil(y_max)) + extend_boundary, ds.sizes["eta_rho"] - 1)
         
         self.ij_crop = [i0, j0]
 
