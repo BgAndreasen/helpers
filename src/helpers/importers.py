@@ -518,11 +518,16 @@ class ROMSReader:
         sc = ds.s_rho
         Cs = ds.Cs_r
         Vt = int(ds.Vtransform.item())
+
         if Vt == 1:
-            z0 = (hc*sc + h*Cs) / (hc + h)
+            z0 = hc * (sc - Cs) + Cs * h
+            z = z0 + zeta * (1 + z0 / h)
+        elif Vt == 2:
+            z0 = (hc * sc + h * Cs) / (hc + h)
+            z = zeta + (zeta + h) * z0
         else:
-            z0 = (hc*(sc - Cs) + h*Cs) / (hc + h)
-        z = zeta + (zeta + h) * z0
+            raise ValueError(f"Unsupported Vtransform={Vt}")
+            
         z = z.transpose("ocean_time","s_rho","eta_rho","xi_rho").rename("z_rho")
         self.ds = ds.assign_coords(z_rho=z)
         return self
@@ -538,11 +543,16 @@ class ROMSReader:
         sw = ds.s_w
         Csw = ds.Cs_w
         Vt = int(ds.Vtransform.item())
+
         if Vt == 1:
-            z0 = (hc*sw + h*Csw) / (hc + h)
+            z0 = hc * (sw - Csw) + Csw * h
+            z = z0 + zeta * (1 + z0 / h)
+        elif Vt == 2:
+            z0 = (hc * sw + h * Csw) / (hc + h)
+            z = zeta + (zeta + h) * z0
         else:
-            z0 = (hc*(sw - Csw) + h*Csw) / (hc + h)
-        z = zeta + (zeta + h) * z0
+            raise ValueError(f"Unsupported Vtransform={Vt}")
+
         z = z.transpose("ocean_time","s_w","eta_rho","xi_rho").rename("z_w")
         self.ds = ds.assign_coords(z_w=z)
         return self
